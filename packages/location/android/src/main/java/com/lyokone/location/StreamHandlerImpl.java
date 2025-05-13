@@ -3,8 +3,8 @@ package com.lyokone.location;
 import android.util.Log;
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.EventChannel;
-import io.flutter.plugin.common.EventChannel.StreamHandler;
 import io.flutter.plugin.common.EventChannel.EventSink;
+import io.flutter.plugin.common.EventChannel.StreamHandler;
 
 class StreamHandlerImpl implements StreamHandler {
     private static final String TAG = "StreamHandlerImpl";
@@ -48,10 +48,6 @@ class StreamHandlerImpl implements StreamHandler {
     @Override
     public void onListen(Object arguments, final EventSink eventsSink) {
         location.events = eventsSink;
-        if (location.activity == null) {
-            eventsSink.error("NO_ACTIVITY", null, null);
-            return;
-        }
 
         if (!location.checkPermissions()) {
             location.requestPermissions();
@@ -65,5 +61,4 @@ class StreamHandlerImpl implements StreamHandler {
         location.mFusedLocationClient.removeLocationUpdates(location.mLocationCallback);
         location.events = null;
     }
-
 }

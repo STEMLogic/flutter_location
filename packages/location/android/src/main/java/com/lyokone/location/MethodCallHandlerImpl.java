@@ -1,24 +1,28 @@
 package com.lyokone.location;
 
+import java.util.Map;
+
+import android.content.Context;
+import android.content.Intent;
 import android.graphics.Color;
 import android.os.Build;
+import android.provider.Settings;
 import android.util.Log;
 
 import androidx.annotation.Nullable;
 
-import java.util.Map;
-
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
-import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
+import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 
 final class MethodCallHandlerImpl implements MethodCallHandler {
     private static final String TAG = "MethodCallHandlerImpl";
 
     private FlutterLocation location;
     private FlutterLocationService locationService;
+    private Context context;
 
     @Nullable
     private MethodChannel channel;
@@ -31,6 +35,10 @@ final class MethodCallHandlerImpl implements MethodCallHandler {
 
     void setLocationService(FlutterLocationService locationService) {
         this.locationService = locationService;
+    }
+
+    void setContext(Context context) {
+        this.context = context;
     }
 
     @Override
@@ -52,7 +60,7 @@ final class MethodCallHandlerImpl implements MethodCallHandler {
                 onServiceEnabled(result);
                 break;
             case "requestService":
-                location.requestService(result);
+                onRequestService(result);
                 break;
             case "isBackgroundModeEnabled":
                 isBackgroundModeEnabled(result);
@@ -98,8 +106,8 @@ final class MethodCallHandlerImpl implements MethodCallHandler {
 
     private void onChangeSettings(MethodCall call, Result result) {
         try {
-            final Integer locationAccuracy = location.mapFlutterAccuracy.get((Integer) call.argument("accuracy"));
-            final Long updateIntervalMilliseconds = new Long((int) call.argument("interval"));
+            final Integer locationAccuracy = location.mapFlutterAccuracy.get(call.argument("accuracy"));
+            final Long updateIntervalMilliseconds = Long.valueOf((int) call.argument("interval"));
             final Long fastestUpdateIntervalMilliseconds = updateIntervalMilliseconds / 2;
             final Float distanceFilter = new Float((double) call.argument("distanceFilter"));
 
@@ -151,6 +159,22 @@ final class MethodCallHandlerImpl implements MethodCallHandler {
 
         location.result = result;
         location.requestPermissions();
+    }
+
+    private void onRequestService(Result result) {
+        if (context == null) {
+            result.error("CONTEXT_ERROR", "Context is not available", null);
+            return;
+        }
+
+        try {
+            Intent intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(intent);
+            result.success(1);
+        } catch (Exception e) {
+            result.error("SERVICE_REQUEST_ERROR", "Could not open location settings: " + e.getMessage(), null);
+        }
     }
 
     private void isBackgroundModeEnabled(Result result) {
