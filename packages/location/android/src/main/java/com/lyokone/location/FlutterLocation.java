@@ -1,12 +1,17 @@
 package com.lyokone.location;
 
+import java.util.HashMap;
+
+import org.jetbrains.annotations.NotNull;
+
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+
 import android.Manifest;
-import android.annotation.TargetApi;
-import android.app.Activity;
-import android.content.ActivityNotFoundException;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentSender;
 import android.content.pm.PackageManager;
 import android.location.Location;
 import android.location.LocationManager;
@@ -14,49 +19,26 @@ import android.location.OnNmeaMessageListener;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Looper;
-import android.util.Log;
 import android.util.SparseArray;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
 
-import com.google.android.gms.common.api.ApiException;
-import com.google.android.gms.common.api.ResolvableApiException;
-import com.google.android.gms.location.FusedLocationProviderClient;
-import com.google.android.gms.location.LocationCallback;
-import com.google.android.gms.location.LocationRequest;
-import com.google.android.gms.location.LocationResult;
-import com.google.android.gms.location.LocationServices;
-import com.google.android.gms.location.LocationSettingsRequest;
-import com.google.android.gms.location.LocationSettingsStatusCodes;
-import com.google.android.gms.location.SettingsClient;
-
 import io.flutter.plugin.common.EventChannel.EventSink;
-import io.flutter.plugin.common.MethodChannel.Result;
 import io.flutter.plugin.common.PluginRegistry;
-import org.jetbrains.annotations.NotNull;
+import io.flutter.plugin.common.MethodChannel.Result;
 
-import java.util.HashMap;
-
-public class FlutterLocation
-        implements PluginRegistry.RequestPermissionsResultListener, PluginRegistry.ActivityResultListener {
+public class FlutterLocation implements PluginRegistry.RequestPermissionsResultListener {
     private static final String TAG = "FlutterLocation";
 
-    @Nullable
-    public Activity activity;
-
     private static final int REQUEST_PERMISSIONS_REQUEST_CODE = 34;
-    private static final int REQUEST_CHECK_SETTINGS = 0x1;
 
-    private static final int GPS_ENABLE_REQUEST = 0x1001;
-
-    public FusedLocationProviderClient mFusedLocationClient;
-    private SettingsClient mSettingsClient;
+    private final Context context;
+    protected FusedLocationProviderClient mFusedLocationClient;
     private LocationRequest mLocationRequest;
-    private LocationSettingsRequest mLocationSettingsRequest;
     public LocationCallback mLocationCallback;
 
-    @TargetApi(Build.VERSION_CODES.N)
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.N)
     private OnNmeaMessageListener mMessageListener;
 
     private Double mLastMslAltitude;
@@ -71,9 +53,6 @@ public class FlutterLocation
 
     // Store result until a permission check is resolved
     public Result result;
-
-    // Store the result for the requestService, used in ActivityResult
-    private Result requestServiceResult;
 
     // Store result until a location is getting resolved
     public Result getLocationResult;
@@ -91,35 +70,21 @@ public class FlutterLocation
         }
     };
 
-    FlutterLocation(Context applicationContext, @Nullable Activity activity) {
-        this.activity = activity;
-        this.locationManager = (LocationManager) applicationContext.getSystemService(Context.LOCATION_SERVICE);
+    FlutterLocation(Context context, @Nullable Object activity) {
+        this.context = context;
+        this.locationManager = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
+        initializeLocationServices();
     }
 
-    void setActivity(@Nullable Activity activity) {
-        this.activity = activity;
-        if (this.activity != null) {
-            mFusedLocationClient = LocationServices.getFusedLocationProviderClient(activity);
-            mSettingsClient = LocationServices.getSettingsClient(activity);
-
-            createLocationCallback();
-            createLocationRequest();
-            buildLocationSettingsRequest();
-        } else {
-            if (mFusedLocationClient != null) {
-                mFusedLocationClient.removeLocationUpdates(mLocationCallback);
-            }
-            mFusedLocationClient = null;
-            mSettingsClient = null;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && locationManager != null) {
-                locationManager.removeNmeaListener(mMessageListener);
-                mMessageListener = null;
-            }
-        }
+    private void initializeLocationServices() {
+        mFusedLocationClient = LocationServices.getFusedLocationProviderClient(context);
+        createLocationCallback();
+        createLocationRequest();
     }
 
     @Override
-    public boolean onRequestPermissionsResult(int requestCode, @NotNull String[] permissions, @NotNull int[] grantResults) {
+    public boolean onRequestPermissionsResult(int requestCode, @NotNull String[] permissions,
+                                              @NotNull int[] grantResults) {
         return onRequestPermissionsResultHandler(requestCode, permissions, grantResults);
     }
 
@@ -154,38 +119,6 @@ public class FlutterLocation
             return true;
         }
         return false;
-
-    }
-
-    @Override
-    public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
-        switch (requestCode) {
-            case GPS_ENABLE_REQUEST:
-                if (this.requestServiceResult == null) {
-                    return false;
-                }
-                if (resultCode == Activity.RESULT_OK) {
-                    this.requestServiceResult.success(1);
-                } else {
-                    this.requestServiceResult.success(0);
-                }
-                this.requestServiceResult = null;
-                return true;
-            case REQUEST_CHECK_SETTINGS:
-                if (this.result == null) {
-                    return false;
-                }
-                if (resultCode == Activity.RESULT_OK) {
-                    startRequestingLocation();
-                    return true;
-                }
-
-                this.result.error("SERVICE_STATUS_DISABLED", "Failed to get location. Location services disabled", null);
-                this.result = null;
-                return true;
-            default:
-                return false;
-        }
     }
 
     public void changeSettings(Integer newLocationAccuracy, Long updateIntervalMilliseconds,
@@ -197,7 +130,6 @@ public class FlutterLocation
 
         createLocationCallback();
         createLocationRequest();
-        buildLocationSettingsRequest();
         startRequestingLocation();
     }
 
@@ -212,9 +144,6 @@ public class FlutterLocation
         }
     }
 
-    /**
-     * Creates a callback for receiving location events.
-     */
     private void createLocationCallback() {
         if (mLocationCallback != null) {
             mFusedLocationClient.removeLocationUpdates(mLocationCallback);
@@ -234,7 +163,7 @@ public class FlutterLocation
                     loc.put("headingAccuracy", (double) location.getBearingAccuracyDegrees());
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    loc.put("elapsedRealtimeUncertaintyNanos", (double) location.getElapsedRealtimeUncertaintyNanos());
+                    loc.put("elapsedRealtimeUncertaintyNanos", location.getElapsedRealtimeUncertaintyNanos());
                 }
 
                 loc.put("provider", location.getProvider());
@@ -299,66 +228,38 @@ public class FlutterLocation
         }
     }
 
-    /**
-     * Sets up the location request. Android has two location request settings:
-     */
     private void createLocationRequest() {
-        mLocationRequest = LocationRequest.create();
-
-        mLocationRequest.setInterval(this.updateIntervalMilliseconds);
-        mLocationRequest.setFastestInterval(this.fastestUpdateIntervalMilliseconds);
-        mLocationRequest.setPriority(this.locationAccuracy);
-        mLocationRequest.setSmallestDisplacement(this.distanceFilter);
+        mLocationRequest = new LocationRequest.Builder(this.updateIntervalMilliseconds)
+                .setMinUpdateIntervalMillis(this.fastestUpdateIntervalMilliseconds)
+                .setPriority(this.locationAccuracy)
+                .setMinUpdateDistanceMeters(this.distanceFilter)
+                .build();
     }
 
-    /**
-     * Uses a
-     * {@link com.google.android.gms.location.LocationSettingsRequest.Builder} to
-     * build a {@link com.google.android.gms.location.LocationSettingsRequest} that
-     * is used for checking if a device has the needed location settings.
-     */
-    private void buildLocationSettingsRequest() {
-        LocationSettingsRequest.Builder builder = new LocationSettingsRequest.Builder();
-        builder.addLocationRequest(mLocationRequest);
-        mLocationSettingsRequest = builder.build();
-    }
-
-    /**
-     * Return the current state of the permissions needed.
-     */
     public boolean checkPermissions() {
-        if (this.activity == null) {
-            result.error("MISSING_ACTIVITY", "You should not checkPermissions activation outside of an activity.", null);
-            throw new ActivityNotFoundException();
-        }
-        int locationPermissionState = ActivityCompat.checkSelfPermission(activity,
+        int locationPermissionState = ActivityCompat.checkSelfPermission(context,
                 Manifest.permission.ACCESS_FINE_LOCATION);
         return locationPermissionState == PackageManager.PERMISSION_GRANTED;
     }
 
     public void requestPermissions() {
-        if (this.activity == null) {
-            result.error("MISSING_ACTIVITY", "You should not requestPermissions activation outside of an activity.", null);
-            throw new ActivityNotFoundException();
-        }
         if (checkPermissions()) {
             result.success(1);
             return;
         }
-        ActivityCompat.requestPermissions(activity, new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
-                REQUEST_PERMISSIONS_REQUEST_CODE);
+        if (result != null) {
+            result.error("PERMISSION_DENIED", "Location permission not granted", null);
+            result = null;
+        }
     }
 
     public boolean shouldShowRequestPermissionRationale() {
-        if (activity == null) {
-            return false;
-        }
-        return ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_FINE_LOCATION);
+        // Since we're using Context and not Activity, we can't use
+        // ActivityCompat.shouldShowRequestPermissionRationale
+        // Instead, we'll check if the permission is already granted
+        return !checkPermissions();
     }
 
-    /**
-     * Checks whether location services is enabled.
-     */
     public boolean checkServiceEnabled() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             return locationManager.isLocationEnabled();
@@ -370,94 +271,18 @@ public class FlutterLocation
         return gps_enabled || network_enabled;
     }
 
-    public void requestService(final Result requestServiceResult) {
-        if (this.activity == null) {
-            requestServiceResult.error("MISSING_ACTIVITY", "You should not requestService activation outside of an activity.", null);
-            throw new ActivityNotFoundException();
-        }
-        try {
-            if (this.checkServiceEnabled()) {
-                requestServiceResult.success(1);
+    public void startRequestingLocation() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            if (ActivityCompat.checkSelfPermission(context,
+                    Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 return;
             }
-        } catch (Exception e) {
-            requestServiceResult.error("SERVICE_STATUS_ERROR", "Location service status couldn't be determined", null);
-            return;
+            locationManager.addNmeaListener(mMessageListener, null);
         }
 
-        this.requestServiceResult = requestServiceResult;
-        mSettingsClient.checkLocationSettings(mLocationSettingsRequest).addOnFailureListener(activity,
-                e -> {
-                    if (e instanceof ResolvableApiException) {
-                        ResolvableApiException rae = (ResolvableApiException) e;
-                        int statusCode = rae.getStatusCode();
-                        switch (statusCode) {
-                            case LocationSettingsStatusCodes.RESOLUTION_REQUIRED:
-                                try {
-                                    // Show the dialog by calling startResolutionForResult(), and check the
-                                    // result in onActivityResult().
-                                    rae.startResolutionForResult(activity, GPS_ENABLE_REQUEST);
-                                } catch (IntentSender.SendIntentException sie) {
-                                    requestServiceResult.error("SERVICE_STATUS_ERROR", "Could not resolve location request",
-                                            null);
-                                }
-                                break;
-                            case LocationSettingsStatusCodes.SETTINGS_CHANGE_UNAVAILABLE:
-                                requestServiceResult.error("SERVICE_STATUS_DISABLED",
-                                        "Failed to get location. Location services disabled", null);
-                                break;
-                        }
-                    } else {
-                        // This should not happen according to Android documentation but it has been
-                        // observed on some phones.
-                        requestServiceResult.error("SERVICE_STATUS_ERROR", "Unexpected error type received", null);
-                    }
-                });
-    }
-
-    public void startRequestingLocation() {
-        if (this.activity == null) {
-            result.error("MISSING_ACTIVITY", "You should not requestLocation activation outside of an activity.", null);
-            throw new ActivityNotFoundException();
+        if (mFusedLocationClient != null) {
+            mFusedLocationClient
+                    .requestLocationUpdates(mLocationRequest, mLocationCallback, Looper.myLooper());
         }
-        mSettingsClient.checkLocationSettings(mLocationSettingsRequest)
-                .addOnSuccessListener(activity, locationSettingsResponse -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        locationManager.addNmeaListener(mMessageListener, null);
-                    }
-
-                    if (mFusedLocationClient != null) {
-                        mFusedLocationClient
-                                .requestLocationUpdates(mLocationRequest, mLocationCallback, Looper.myLooper());
-                    }
-                }).addOnFailureListener(activity, e -> {
-                    if (e instanceof ResolvableApiException) {
-                        ResolvableApiException rae = (ResolvableApiException) e;
-                        int statusCode = rae.getStatusCode();
-                        if (statusCode == LocationSettingsStatusCodes.RESOLUTION_REQUIRED) {
-                            try {
-                                // Show the dialog by calling startResolutionForResult(), and check the
-                                // result in onActivityResult().
-                                rae.startResolutionForResult(activity, REQUEST_CHECK_SETTINGS);
-                            } catch (IntentSender.SendIntentException sie) {
-                                Log.i(TAG, "PendingIntent unable to execute request.");
-                            }
-                        }
-                    } else {
-                        ApiException ae = (ApiException) e;
-                        int statusCode = ae.getStatusCode();
-                        if (statusCode == LocationSettingsStatusCodes.SETTINGS_CHANGE_UNAVAILABLE) {// This error code happens during AirPlane mode.
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                locationManager.addNmeaListener(mMessageListener, null);
-                            }
-                            mFusedLocationClient.requestLocationUpdates(mLocationRequest, mLocationCallback,
-                                    Looper.myLooper());
-                        } else {// This should not happen according to Android documentation but it has been
-                            // observed on some phones.
-                            sendError("UNEXPECTED_ERROR", e.getMessage(), null);
-                        }
-                    }
-                });
     }
-
 }
