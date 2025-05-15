@@ -253,7 +253,7 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
         }
     }
 
-    fun setContext(context: Context) {
+    fun setContext(context: Context?) {
         this.context = context
     }
 

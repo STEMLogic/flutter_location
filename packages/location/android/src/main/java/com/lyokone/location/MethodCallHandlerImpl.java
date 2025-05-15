@@ -29,15 +29,15 @@ final class MethodCallHandlerImpl implements MethodCallHandler {
 
     private static final String METHOD_CHANNEL_NAME = "lyokone/location";
 
-    void setLocation(FlutterLocation location) {
+    void setLocation(@Nullable FlutterLocation location) {
         this.location = location;
     }
 
-    void setLocationService(FlutterLocationService locationService) {
+    void setLocationService(@Nullable FlutterLocationService locationService) {
         this.locationService = locationService;
     }
 
-    void setContext(Context context) {
+    void setContext(@Nullable Context context) {
         this.context = context;
     }
 
@@ -117,7 +117,7 @@ final class MethodCallHandlerImpl implements MethodCallHandler {
             result.success(1);
         } catch (Exception e) {
             result.error("CHANGE_SETTINGS_ERROR",
-                    "An unexcepted error happened during location settings change:" + e.getMessage(), null);
+                    "An unexpected error happened during location settings change:" + e.getMessage(), null);
         }
     }
 
