@@ -76,17 +76,25 @@ public class LocationPlugin implements FlutterPlugin {
         locationService = service;
         locationService.setContext(context);
 
-        methodCallHandler.setLocation(locationService.getLocation());
-        methodCallHandler.setLocationService(locationService);
+        if (methodCallHandler != null) {
+            methodCallHandler.setLocation(locationService.getLocation());
+            methodCallHandler.setLocationService(locationService);
+        }
 
-        streamHandlerImpl.setLocation(locationService.getLocation());
+        if (streamHandlerImpl != null) {
+            streamHandlerImpl.setLocation(locationService.getLocation());
+        }
     }
 
     private void dispose() {
-        streamHandlerImpl.setLocation(null);
+        if (streamHandlerImpl != null) {
+            streamHandlerImpl.setLocation(null);
+        }
 
-        methodCallHandler.setLocationService(null);
-        methodCallHandler.setLocation(null);
+        if (methodCallHandler != null) {
+            methodCallHandler.setLocationService(null);
+            methodCallHandler.setLocation(null);
+        }
 
         if (locationService != null) {
             locationService.setContext(null);

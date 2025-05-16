@@ -1,6 +1,10 @@
 package com.lyokone.location;
 
+
 import android.util.Log;
+
+import androidx.annotation.Nullable;
+
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.EventChannel;
 import io.flutter.plugin.common.EventChannel.EventSink;
@@ -14,7 +18,7 @@ class StreamHandlerImpl implements StreamHandler {
 
     private static final String STREAM_CHANNEL_NAME = "lyokone/locationstream";
 
-    void setLocation(FlutterLocation location) {
+    void setLocation(@Nullable FlutterLocation location) {
         this.location = location;
     }
 
