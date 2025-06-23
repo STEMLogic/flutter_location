@@ -1,7 +1,7 @@
 package com.lyokone.location;
 
-import android.content.Context;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.IBinder;
@@ -10,6 +10,8 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import io.flutter.embedding.engine.FlutterEngine;
+import io.flutter.embedding.engine.FlutterEngineCache;
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 
 /**
@@ -28,31 +30,48 @@ public class LocationPlugin implements FlutterPlugin {
 
     @Override
     public void onAttachedToEngine(@NonNull FlutterPluginBinding binding) {
-        context = binding.getApplicationContext();
-        methodCallHandler = new MethodCallHandlerImpl();
-        methodCallHandler.setContext(context);
-        methodCallHandler.startListening(binding.getBinaryMessenger());
-        streamHandlerImpl = new StreamHandlerImpl();
-        streamHandlerImpl.startListening(binding.getBinaryMessenger());
+        // Only initialize if the shared engine is being used
+        FlutterEngine flutterEngine = FlutterEngineCache.getInstance().get("SharedEngine");
+        if (flutterEngine != null && flutterEngine == binding.getFlutterEngine()) {
+            if (context == null) {
+                context = binding.getApplicationContext();
 
-        // Bind to the location service
-        context.bindService(new Intent(context, FlutterLocationService.class), serviceConnection,
-                Context.BIND_AUTO_CREATE);
+                if (methodCallHandler == null) {
+                    methodCallHandler = new MethodCallHandlerImpl();
+                    methodCallHandler.setContext(context);
+                    methodCallHandler.startListening(binding.getBinaryMessenger());
+                }
+
+                if (streamHandlerImpl == null) {
+                    streamHandlerImpl = new StreamHandlerImpl();
+                    streamHandlerImpl.startListening(binding.getBinaryMessenger());
+                }
+
+                // Bind to the location service
+                context.bindService(new Intent(context, FlutterLocationService.class), serviceConnection, Context.BIND_AUTO_CREATE);
+            }
+        }
     }
 
     @Override
     public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
-        dispose();
         if (methodCallHandler != null) {
+            methodCallHandler.setLocationService(null);
+            methodCallHandler.setLocation(null);
             methodCallHandler.stopListening();
             methodCallHandler = null;
         }
+
         if (streamHandlerImpl != null) {
+            streamHandlerImpl.setLocation(null);
             streamHandlerImpl.stopListening();
             streamHandlerImpl = null;
         }
+
         if (context != null && locationService != null) {
             context.unbindService(serviceConnection);
+            locationService.setContext(null);
+            locationService = null;
             context = null;
         }
     }
@@ -73,6 +92,7 @@ public class LocationPlugin implements FlutterPlugin {
     };
 
     private void initialize(FlutterLocationService service) {
+        if (locationService != null) return;
         locationService = service;
         locationService.setContext(context);
 
@@ -86,19 +106,4 @@ public class LocationPlugin implements FlutterPlugin {
         }
     }
 
-    private void dispose() {
-        if (streamHandlerImpl != null) {
-            streamHandlerImpl.setLocation(null);
-        }
-
-        if (methodCallHandler != null) {
-            methodCallHandler.setLocationService(null);
-            methodCallHandler.setLocation(null);
-        }
-
-        if (locationService != null) {
-            locationService.setContext(null);
-            locationService = null;
-        }
-    }
 }
