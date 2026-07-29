@@ -1,0 +1,541 @@
+import CoreLocation
+
+#if os(iOS)
+import Flutter
+import UIKit
+#elseif os(macOS)
+import AppKit
+import FlutterMacOS
+#endif
+
+public class LocationPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, CLLocationManagerDelegate {
+    private var clLocationManager: CLLocationManager?
+    private var flutterResult: FlutterResult?
+    private var flutterEventSink: FlutterEventSink?
+
+    // Pending getLocation() calls waiting for the next fix. A list rather than
+    // a single field: overwriting a single pending result silently orphaned an
+    // earlier concurrent getLocation() call's Future forever when a second one
+    // came in before the first resolved (#977). All pending calls resolve
+    // together with the same fix/error.
+    private var pendingLocationResults: [FlutterResult] = []
+    private var permissionWanted = false
+    private var flutterListening = false
+    private var hasInit = false
+    private var applicationHasLocationBackgroundMode = false
+
+    // CoreLocation delivers a cached fix immediately when updates start; fixes
+    // older than this (in seconds) are treated as stale and skipped. See
+    // locationManager(_:didUpdateLocations:).
+    private let staleLocationThreshold: TimeInterval = 15
+
+    // Core Location has no native "minimum time between updates" concept (only
+    // distanceFilter, a minimum distance) unlike Android's LocationRequest
+    // interval, so `interval` was silently ignored on iOS/macOS and the stream
+    // fired as fast as fixes arrived (#960). Throttled client-side instead: the
+    // stream drops updates delivered sooner than this many milliseconds after
+    // the last one it forwarded. Matches the Dart-side default of 1000ms.
+    private var updateIntervalMilliseconds: Double = 1000
+    private var lastStreamUpdateAt: Date?
+
+    public static func register(with registrar: FlutterPluginRegistrar) {
+        #if os(iOS)
+        let messenger = registrar.messenger()
+        #elseif os(macOS)
+        let messenger = registrar.messenger
+        #endif
+
+        let channel = FlutterMethodChannel(name: "lyokone/location", binaryMessenger: messenger)
+        let stream = FlutterEventChannel(name: "lyokone/locationstream", binaryMessenger: messenger)
+
+        let instance = LocationPlugin()
+        registrar.addMethodCallDelegate(instance, channel: channel)
+        stream.setStreamHandler(instance)
+    }
+
+    private func initLocation() {
+        guard !hasInit else { return }
+        hasInit = true
+
+        let backgroundModes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
+        applicationHasLocationBackgroundMode = backgroundModes?.contains("location") ?? false
+
+        let manager = CLLocationManager()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.pausesLocationUpdatesAutomatically = true
+        clLocationManager = manager
+    }
+
+    public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        initLocation()
+
+        switch call.method {
+        case "changeSettings":
+            onChangeSettings(call, result: result)
+        case "isBackgroundModeEnabled":
+            onIsBackgroundModeEnabled(result: result)
+        case "enableBackgroundMode":
+            onEnableBackgroundMode(call, result: result)
+        case "getLocation":
+            onGetLocation(result: result)
+        case "getLastKnownLocation":
+            onGetLastKnownLocation(result: result)
+        case "hasPermission":
+            onHasPermission(result: result)
+        case "isBackgroundPermissionGranted":
+            onIsBackgroundPermissionGranted(result: result)
+        case "requestPermission":
+            onRequestPermission(result: result)
+        case "serviceEnabled":
+            onServiceEnabled(result: result)
+        case "requestService":
+            onRequestService(result: result)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    // MARK: - Location services
+
+    /// `CLLocationManager.locationServicesEnabled()` can block the calling
+    /// thread while location services start up. Apple warns against calling it
+    /// on the main thread — doing so triggers the "UI unresponsiveness" runtime
+    /// warning and can hang the app (#782, #789, #909, #1004, #1027). Run it on
+    /// a background queue and deliver the answer back on the main thread, where
+    /// the `CLLocationManager` instance and the Flutter result must be used.
+    private func locationServicesEnabled(_ completion: @escaping (Bool) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let enabled = CLLocationManager.locationServicesEnabled()
+            DispatchQueue.main.async {
+                completion(enabled)
+            }
+        }
+    }
+
+    // MARK: - Method handlers
+
+    private func onChangeSettings(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        locationServicesEnabled { [weak self] enabled in
+            guard let self, enabled else { return }
+            guard
+                let manager = self.clLocationManager,
+                let args = call.arguments as? [String: Any]
+            else {
+                result(FlutterError(code: "CHANGE_SETTINGS_ERROR", message: "Invalid arguments", details: nil))
+                return
+            }
+
+            var reducedAccuracy = kCLLocationAccuracyHundredMeters
+            if #available(iOS 14, macOS 11, *) {
+                reducedAccuracy = kCLLocationAccuracyReduced
+            }
+            let accuracyMap: [Int: CLLocationAccuracy] = [
+                0: kCLLocationAccuracyKilometer,
+                1: kCLLocationAccuracyHundredMeters,
+                2: kCLLocationAccuracyNearestTenMeters,
+                3: kCLLocationAccuracyBest,
+                4: kCLLocationAccuracyBestForNavigation,
+                5: reducedAccuracy,
+            ]
+
+            if let accuracy = args["accuracy"] as? Int, let mapped = accuracyMap[accuracy] {
+                manager.desiredAccuracy = mapped
+            }
+
+            let distanceFilter = args["distanceFilter"] as? Double ?? 0
+            manager.distanceFilter = distanceFilter == 0 ? kCLDistanceFilterNone : distanceFilter
+
+            if let interval = args["interval"] as? Int {
+                self.updateIntervalMilliseconds = Double(interval)
+            }
+
+            if let pauses = args["pausesLocationUpdatesAutomatically"] as? Bool {
+                manager.pausesLocationUpdatesAutomatically = pauses
+            }
+
+            // `backgroundInterval` is intentionally ignored on Apple platforms:
+            // CoreLocation does not expose a separate background update interval,
+            // so it is an Android-only setting.
+            result(1)
+        }
+    }
+
+    private func onIsBackgroundModeEnabled(result: FlutterResult) {
+        #if os(iOS)
+        if applicationHasLocationBackgroundMode, let manager = clLocationManager {
+            result(manager.allowsBackgroundLocationUpdates ? 1 : 0)
+            return
+        }
+        #endif
+        result(0)
+    }
+
+    private func onEnableBackgroundMode(_ call: FlutterMethodCall, result: FlutterResult) {
+        let enable = (call.arguments as? [String: Any])?["enable"] as? Bool ?? false
+        #if os(iOS)
+        if applicationHasLocationBackgroundMode, let manager = clLocationManager {
+            manager.allowsBackgroundLocationUpdates = enable
+            manager.showsBackgroundLocationIndicator = enable
+            result(enable ? 1 : 0)
+            return
+        }
+        #endif
+        result(0)
+    }
+
+    private func onGetLocation(result: @escaping FlutterResult) {
+        locationServicesEnabled { [weak self] enabled in
+            guard let self else { return }
+            guard enabled else {
+                result(FlutterError(
+                    code: "SERVICE_STATUS_DISABLED",
+                    message: "Failed to get location. Location services disabled",
+                    details: nil,
+                ))
+                return
+            }
+            // .restricted (parental controls / MDM) needs the same early-out as
+            // .denied: requestPermission() below is a no-op for it (CLLocationManager
+            // cannot prompt for or change a restricted status), so without this the
+            // pending result appended just below would never resolve.
+            if self.isPermissionDeniedOrRestricted {
+                result(FlutterError(
+                    code: "PERMISSION_DENIED",
+                    message: "The user explicitly denied the use of location services for this app or "
+                        + "location services are currently disabled in Settings.",
+                    details: nil,
+                ))
+                return
+            }
+
+            self.pendingLocationResults.append(result)
+
+            if self.isPermissionGranted {
+                self.clLocationManager?.startUpdatingLocation()
+            } else {
+                self.requestPermission()
+            }
+        }
+    }
+
+    /// Returns the most recently cached fix from CoreLocation, or `nil` if none
+    /// is available. `CLLocationManager.location` holds the last known location
+    /// without starting fresh updates, so this returns immediately.
+    private func onGetLastKnownLocation(result: @escaping FlutterResult) {
+        guard isPermissionGranted, let location = clLocationManager?.location else {
+            result(nil)
+            return
+        }
+        result(coordinates(from: location))
+    }
+
+    private func onHasPermission(result: FlutterResult) {
+        if isPermissionGranted {
+            result(isHighAccuracyPermitted ? 1 : 3)
+        } else if isPermissionDeniedOrRestricted {
+            // Once authorization has actually been denied (or is restricted by
+            // parental controls/MDM), iOS won't show the system prompt again --
+            // requestPermission() already reflects this by returning deniedForever
+            // for any non-notDetermined, non-granted status. hasPermission()
+            // previously always returned plain `denied` regardless, inconsistent
+            // with what a following requestPermission() call would report for the
+            // same state (#738).
+            result(2)
+        } else {
+            result(0)
+        }
+    }
+
+    /// Whether the current authorization status can never turn into a grant
+    /// without the user leaving the app to change it in Settings: either an
+    /// explicit `.denied`, or `.restricted` (parental controls/MDM), for which
+    /// `CLLocationManager` cannot prompt or change the status at all.
+    private var isPermissionDeniedOrRestricted: Bool {
+        currentAuthorizationStatus == .denied || currentAuthorizationStatus == .restricted
+    }
+
+    /// Whether background ("Always") location authorization has been granted.
+    ///
+    /// On both iOS and macOS this maps to `.authorizedAlways`; the more limited
+    /// `.authorizedWhenInUse` does not grant background access.
+    private func onIsBackgroundPermissionGranted(result: FlutterResult) {
+        result(currentAuthorizationStatus == .authorizedAlways ? 1 : 0)
+    }
+
+    private func onRequestPermission(result: @escaping FlutterResult) {
+        if isPermissionGranted {
+            result(isHighAccuracyPermitted ? 1 : 3)
+        } else if currentAuthorizationStatus == .notDetermined {
+            flutterResult = result
+            permissionWanted = true
+            requestPermission()
+        } else {
+            result(2)
+        }
+    }
+
+    private func onServiceEnabled(result: @escaping FlutterResult) {
+        locationServicesEnabled { enabled in
+            result(enabled ? 1 : 0)
+        }
+    }
+
+    private func onRequestService(result: @escaping FlutterResult) {
+        locationServicesEnabled { enabled in
+            if enabled {
+                result(1)
+                return
+            }
+            #if os(macOS)
+            let alert = NSAlert()
+            alert.messageText = "Location is Disabled"
+            alert.informativeText = "To use location, go to your System Settings > Privacy & Security > "
+                + "Location Services."
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            if let window = NSApplication.shared.mainWindow {
+                alert.beginSheetModal(for: window) { response in
+                    if response == .alertFirstButtonReturn,
+                       let url = URL(
+                           string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+            #elseif os(iOS)
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            }
+            #endif
+            result(0)
+        }
+    }
+
+    // MARK: - Permissions
+
+    private func requestPermission() {
+        let hasWhenInUse = Bundle.main.object(forInfoDictionaryKey: "NSLocationWhenInUseUsageDescription") != nil
+        // NSLocationAlwaysUsageDescription is the pre-iOS 11 key; the modern,
+        // README-recommended key is NSLocationAlwaysAndWhenInUseUsageDescription.
+        // Only checking the old key meant an app declaring solely the current
+        // key was treated as having neither description (#962).
+        let hasAlways = Bundle.main.object(forInfoDictionaryKey: "NSLocationAlwaysUsageDescription") != nil
+            || Bundle.main.object(forInfoDictionaryKey: "NSLocationAlwaysAndWhenInUseUsageDescription") != nil
+
+        #if os(macOS)
+        if hasWhenInUse || hasAlways {
+            clLocationManager?.requestAlwaysAuthorization()
+            return
+        }
+        #elseif os(iOS)
+        if hasWhenInUse {
+            clLocationManager?.requestWhenInUseAuthorization()
+            return
+        } else if hasAlways {
+            clLocationManager?.requestAlwaysAuthorization()
+            return
+        }
+        #endif
+
+        NSLog(
+            "[Location] Missing NSLocationWhenInUseUsageDescription (or NSLocationAlwaysAndWhenInUseUsageDescription) "
+                + "in Info.plist; the location permission cannot be requested.")
+    }
+
+    private var currentAuthorizationStatus: CLAuthorizationStatus {
+        if #available(iOS 14.0, macOS 11.0, *) {
+            return clLocationManager?.authorizationStatus ?? .notDetermined
+        } else {
+            return CLLocationManager.authorizationStatus()
+        }
+    }
+
+    private var isPermissionGranted: Bool {
+        switch currentAuthorizationStatus {
+        #if os(macOS)
+        case .authorizedAlways:
+            return true
+        #else
+        case .authorizedWhenInUse, .authorizedAlways:
+            return true
+        #endif
+        default:
+            return false
+        }
+    }
+
+    private var isHighAccuracyPermitted: Bool {
+        if #available(iOS 14.0, macOS 11.0, *) {
+            if clLocationManager?.accuracyAuthorization == .reducedAccuracy {
+                return false
+            }
+        }
+        return true
+    }
+
+    // MARK: - FlutterStreamHandler
+
+    public func onListen(withArguments _: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        flutterEventSink = events
+        flutterListening = true
+        lastStreamUpdateAt = nil
+
+        if isPermissionGranted {
+            clLocationManager?.startUpdatingLocation()
+        } else {
+            requestPermission()
+        }
+        return nil
+    }
+
+    public func onCancel(withArguments _: Any?) -> FlutterError? {
+        flutterListening = false
+        clLocationManager?.stopUpdatingLocation()
+        return nil
+    }
+
+    // MARK: - Location serialization
+
+    /// Builds the coordinates dictionary sent to Flutter from a [CLLocation].
+    /// Shared by the location stream, one-shot `getLocation` and
+    /// `getLastKnownLocation` so every path returns the same shape.
+    private func coordinates(from location: CLLocation) -> [String: Any] {
+        let timeInMilliseconds = location.timestamp.timeIntervalSince1970 * 1000
+
+        // Detect simulated/mocked locations and locations produced by a
+        // connected accessory (e.g. an external GPS receiver). `sourceInformation`
+        // is only available on iOS 15.0+/macOS 12.0+; on older systems Core
+        // Location exposes no such flags, so default both to false. The Dart side
+        // reads these under the `isMock` and `isProducedByAccessory` keys.
+        var isMock = false
+        var isProducedByAccessory = false
+        if #available(iOS 15.0, macOS 12.0, *) {
+            if let source: CLLocationSourceInformation = location.sourceInformation {
+                isMock = source.isSimulatedBySoftware
+                isProducedByAccessory = source.isProducedByAccessory
+            }
+        }
+
+        // Core Location uses a negative value as a sentinel for "invalid/not
+        // available" on speed and speed accuracy (see the `CLLocation.speed`
+        // and `CLLocation.speedAccuracy` docs). Passed straight through, that
+        // sentinel reads to Dart callers as a real (negative) measurement
+        // rather than "no data", e.g. a stationary or indoor fix reporting a
+        // speed of exactly -1 (#741). Map it to `nil` instead.
+        let speed: Double? = location.speed >= 0 ? location.speed : nil
+        let speedAccuracy: Double? = location.speedAccuracy >= 0 ? location.speedAccuracy : nil
+
+        return [
+            "latitude": location.coordinate.latitude,
+            "longitude": location.coordinate.longitude,
+            "accuracy": location.horizontalAccuracy,
+            "verticalAccuracy": location.verticalAccuracy,
+            "altitude": location.altitude,
+            "speed": speed as Any,
+            "speed_accuracy": speedAccuracy as Any,
+            "heading": location.course,
+            "time": timeInMilliseconds,
+            "isMock": isMock ? 1 : 0,
+            "isProducedByAccessory": isProducedByAccessory ? 1 : 0,
+        ]
+    }
+
+    // MARK: - CLLocationManagerDelegate
+
+    public func locationManager(_: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+
+        // CoreLocation delivers a cached "last known" fix immediately when
+        // updates start. Skip clearly-stale fixes so callers get a current
+        // position — but key this off the fix age rather than swallowing a
+        // fixed number of updates. The old counter dropped the first two
+        // updates, so a one-shot getLocation() never completed when fewer than
+        // three arrived: reduced accuracy delivers a single update (#984) and a
+        // static iOS-simulator location emits only a couple (#657, #955, #1005,
+        // #1013), leaving the Dart Future hanging forever.
+        if abs(location.timestamp.timeIntervalSinceNow) > staleLocationThreshold {
+            return
+        }
+
+        let coordinates = coordinates(from: location)
+
+        if !pendingLocationResults.isEmpty {
+            pendingLocationResults.forEach { $0(coordinates) }
+            pendingLocationResults.removeAll()
+        }
+        if flutterListening {
+            let now = Date()
+            if let lastUpdate = lastStreamUpdateAt,
+               now.timeIntervalSince(lastUpdate) * 1000 < updateIntervalMilliseconds {
+                return
+            }
+            lastStreamUpdateAt = now
+            flutterEventSink?(coordinates)
+        } else {
+            clLocationManager?.stopUpdatingLocation()
+        }
+    }
+
+    @available(iOS 14.0, macOS 11.0, *)
+    public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        handleAuthorizationChange(manager.authorizationStatus)
+    }
+
+    public func locationManager(_: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        // On iOS 14+/macOS 11+ the parameter-less variant above is used instead.
+        if #available(iOS 14.0, macOS 11.0, *) { return }
+        handleAuthorizationChange(status)
+    }
+
+    private func handleAuthorizationChange(_ status: CLAuthorizationStatus) {
+        if status == .denied {
+            if permissionWanted {
+                permissionWanted = false
+                flutterResult?(0)
+                flutterResult = nil
+            }
+            if !pendingLocationResults.isEmpty {
+                // getLocation() requested permission just-in-time (status was
+                // .notDetermined) and the user denied it. Without this, the pending
+                // result(s) were never resolved and the Dart Future(s) from
+                // getLocation() hung forever instead of throwing, since only the
+                // requestPermission() flow above resolved on denial (#979).
+                //
+                // This must be a second independent `if`, not `else if`: a
+                // concurrent requestPermission() + getLocation() pair (the same
+                // shape of concurrent call the #977 fix targets) can leave both
+                // permissionWanted and pendingLocationResults non-empty at once,
+                // and an `else if` here silently dropped the getLocation() side,
+                // leaving those Futures hanging forever.
+                let error = FlutterError(
+                    code: "PERMISSION_DENIED",
+                    message: "The user explicitly denied the use of location services for this app or "
+                        + "location services are currently disabled in Settings.",
+                    details: nil,
+                )
+                pendingLocationResults.forEach { $0(error) }
+                pendingLocationResults.removeAll()
+            }
+            return
+        }
+
+        let granted: Bool
+        #if os(macOS)
+        granted = status == .authorizedAlways
+        #else
+        granted = status == .authorizedWhenInUse || status == .authorizedAlways
+        #endif
+
+        guard granted else { return }
+
+        if permissionWanted {
+            permissionWanted = false
+            flutterResult?(isHighAccuracyPermitted ? 1 : 3)
+            flutterResult = nil
+        }
+        if !pendingLocationResults.isEmpty || flutterListening {
+            clLocationManager?.startUpdatingLocation()
+        }
+    }
+}

@@ -50,12 +50,23 @@ void main() {
   );
 
   test('getLocation should call the correct underlying instance', () async {
-    when(location.getLocation())
-        .thenAnswer((_) => Future.value(LocationData.fromMap({})));
+    when(location.getLocation()).thenAnswer((_) => Future.value(
+        LocationData.fromMap({'latitude': 42.0, 'longitude': 2.0})));
 
     await location.getLocation();
     verify(mockLocation.getLocation()).called(1);
   });
+
+  test(
+    'getLastKnownLocation should call the correct underlying instance',
+    () async {
+      when(location.getLastKnownLocation()).thenAnswer((_) => Future.value(
+          LocationData.fromMap({'latitude': 42.0, 'longitude': 2.0})));
+
+      await location.getLastKnownLocation();
+      verify(mockLocation.getLastKnownLocation()).called(1);
+    },
+  );
 
   test(
     'hasPermission should call the correct underlying instance',

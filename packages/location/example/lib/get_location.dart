@@ -36,6 +36,26 @@ class _GetLocationState extends State<GetLocationWidget> {
     }
   }
 
+  Future<void> _getLastKnownLocation() async {
+    setState(() {
+      _error = null;
+      _loading = true;
+    });
+    try {
+      final locationResult = await location.getLastKnownLocation();
+      setState(() {
+        _location = locationResult;
+        _error = locationResult == null ? 'No cached location available' : null;
+        _loading = false;
+      });
+    } on PlatformException catch (err) {
+      setState(() {
+        _error = err.code;
+        _loading = false;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -43,17 +63,25 @@ class _GetLocationState extends State<GetLocationWidget> {
       children: <Widget>[
         Text(
           'Location: ${_error ?? '${_location ?? "unknown"}'}',
+          key: const Key('getLocationText'),
           style: Theme.of(context).textTheme.bodyLarge,
         ),
         Row(
           children: <Widget>[
             ElevatedButton(
+              key: const Key('getLocationButton'),
               onPressed: _getLocation,
               child: _loading
                   ? const CircularProgressIndicator(
                       color: Colors.white,
                     )
                   : const Text('Get'),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              key: const Key('getLastKnownLocationButton'),
+              onPressed: _getLastKnownLocation,
+              child: const Text('Get last known'),
             ),
           ],
         ),

@@ -8,34 +8,75 @@ description: How to get your user's location
 To get the location of the user, you can simply use
 
 ```dart
-Future<LocationData> getLocation({LocationSettings? settings})
+Future<LocationData> getLocation()
 ```
-
-To see all the settings, see [the settings](/features/settings) page.
 
 By default, the call will try to **request permission** if needed, **activate GPS** and return the location without anything needed from your part.
 If something goes wrong the call will throw.
 
-If you have set global settings, it will use those settings instead of the default ones.
+The accuracy, interval and distance filter used for the request come from the
+global settings. See [the settings](/features/settings) page to change them with
+`changeSettings`.
 
-If you are currently listening for location with `onLocationChanged`, it will use the settings from this call.
+## Devices without Google Play services (Android)
 
-If you call getLocation multiples times, the requests will be queued and they will receive the same location when available.
+On Android the plugin uses the Google Play services fused location provider when
+it is available. On devices without Google Play services (many Huawei devices,
+some Chinese ROMs, AOSP builds) it automatically falls back to the Android
+framework `LocationManager` (GPS and network providers). `getLocation`,
+`getLastKnownLocation` and `onLocationChanged` all work through this fallback,
+returning the same `LocationData`. No configuration is required, and devices
+with Google Play services are unaffected.
+
+Note that on non-GMS devices `requestService()` cannot show the in-app
+"turn on location" dialog (that dialog is a Google Play services feature). When
+the location service is off it reports the service as disabled so you can direct
+the user to the system location settings instead.
 
 ## Examples
 
 ### Getting location
 
 ```dart
-final location = await getLocation();
-print("Location: ${location.latitude}, ${location.longitude}");
+final location = Location();
+final locationData = await location.getLocation();
+print("Location: ${locationData.latitude}, ${locationData.longitude}");
 ```
 
 ### With custom settings
 
+Configure the request beforehand with `changeSettings`:
+
 ```dart
-final location = await getLocation(
-    settings: LocationSettings(ignoreLastKnownPosition: true),
-);
-print("Location: ${location.latitude}, ${location.longitude}");
+final location = Location();
+await location.changeSettings(accuracy: LocationAccuracy.high);
+final locationData = await location.getLocation();
+print("Location: ${locationData.latitude}, ${locationData.longitude}");
 ```
+
+## Last known location
+
+If you want to show something immediately instead of waiting for a fresh fix,
+you can read the location the platform has already cached:
+
+```dart
+Future<LocationData?> getLastKnownLocation()
+```
+
+Unlike `getLocation`, this returns right away without acquiring a new fix. It
+returns `null` when no cached location is available (for example on a fresh
+install). This is handy for displaying an approximate position — for instance a
+grey marker with its timestamp — while a precise location is still being
+acquired.
+
+```dart
+final location = Location();
+final cached = await location.getLastKnownLocation();
+if (cached != null) {
+    print("Last known: ${cached.latitude}, ${cached.longitude}");
+}
+// Meanwhile, request a precise fix.
+final fresh = await location.getLocation();
+```
+
+Web has no cached-location concept and always returns `null`.

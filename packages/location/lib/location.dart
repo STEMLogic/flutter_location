@@ -1,5 +1,6 @@
 // Ignored since there is a bug in the coverage report tool
 // https://github.com/dart-lang/coverage/issues/339 coverage:ignore-file
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:location_platform_interface/location_platform_interface.dart';
@@ -22,24 +23,33 @@ class Location implements LocationPlatform {
   /// Changes settings of the location request.
   ///
   /// The [accuracy] argument is controlling the precision of the
-  /// [LocationData]. The [interval] and [distanceFilter] are controlling how
-  /// often a new location is sent through [onLocationChanged]. The
-  /// [pausesLocationUpdatesAutomatically] argument indicates whether the
-  /// underlying location manager object may pause location updates.
+  /// [LocationData]. The [interval] (in milliseconds) and [distanceFilter] (in
+  /// meters) control how often a new location is sent through
+  /// [onLocationChanged]. The [pausesLocationUpdatesAutomatically] argument
+  /// indicates whether the underlying location manager object may pause location
+  /// updates.
   ///
   /// [interval] and [distanceFilter] are not used on web.
+  ///
+  /// [backgroundInterval] (in milliseconds, Android only) sets a different
+  /// update interval to use while background mode is enabled (see
+  /// [enableBackgroundMode]). When null, [interval] is used in the background as
+  /// well. This is ignored on iOS, macOS and web, where the interval is not
+  /// tunable per app lifecycle state.
   @override
   Future<bool> changeSettings({
     LocationAccuracy? accuracy = LocationAccuracy.high,
     int? interval = 1000,
     double? distanceFilter = 0,
     bool? pausesLocationUpdatesAutomatically = true,
+    int? backgroundInterval,
   }) {
     return LocationPlatform.instance.changeSettings(
       accuracy: accuracy,
       interval: interval,
       distanceFilter: distanceFilter,
       pausesLocationUpdatesAutomatically: pausesLocationUpdatesAutomatically,
+      backgroundInterval: backgroundInterval,
     );
   }
 
@@ -50,9 +60,28 @@ class Location implements LocationPlatform {
   }
 
   /// Enables or disables service in the background mode.
+  ///
+  /// This can be called independently, before you start listening to
+  /// [onLocationChanged]. On Android, enabling background mode also requests the
+  /// `ACCESS_BACKGROUND_LOCATION` permission if it has not been granted yet, so
+  /// it can be used to prompt for background location permission on its own —
+  /// unless [requireBackgroundPermission] is set to `false` (Android only;
+  /// ignored elsewhere), in which case the foreground service is started
+  /// directly on just the foreground permission. A foreground service with
+  /// the location type retains location access while backgrounded without
+  /// needing `ACCESS_BACKGROUND_LOCATION` ("Allow all the time") at all —
+  /// that permission is only required for location access *outside* of an
+  /// active foreground service. Defaults to `true`, preserving the previous
+  /// behavior.
   @override
-  Future<bool> enableBackgroundMode({bool? enable = true}) {
-    return LocationPlatform.instance.enableBackgroundMode(enable: enable);
+  Future<bool> enableBackgroundMode({
+    bool? enable = true,
+    bool requireBackgroundPermission = true,
+  }) {
+    return LocationPlatform.instance.enableBackgroundMode(
+      enable: enable,
+      requireBackgroundPermission: requireBackgroundPermission,
+    );
   }
 
   /// Gets the current location of the user.
@@ -60,8 +89,23 @@ class Location implements LocationPlatform {
   /// Throws an error if the app has no permission to access location. Returns a
   /// [LocationData] object.
   @override
-  Future<LocationData> getLocation() async {
+  Future<LocationData> getLocation() {
     return LocationPlatform.instance.getLocation();
+  }
+
+  /// Gets the most recently cached location of the user, if any.
+  ///
+  /// Unlike [getLocation], this returns immediately with the last known
+  /// location the platform has cached, without waiting for a fresh fix. This is
+  /// useful to display an approximate position (for example a grey marker with
+  /// its timestamp) while a precise location is still being acquired.
+  ///
+  /// Returns `null` when no cached location is available (for example on a
+  /// fresh install, or when the platform has no cached fix). Web has no cached
+  /// location concept and therefore always returns `null`.
+  @override
+  Future<LocationData?> getLastKnownLocation() {
+    return LocationPlatform.instance.getLastKnownLocation();
   }
 
   /// Checks if the app has permission to access location.
@@ -80,6 +124,22 @@ class Location implements LocationPlatform {
   @override
   Future<PermissionStatus> requestPermission() {
     return LocationPlatform.instance.requestPermission();
+  }
+
+  /// Checks whether the app has been granted background ("Allow all the time")
+  /// location access, in addition to foreground access.
+  ///
+  /// Use this before calling [enableBackgroundMode] to decide whether to show
+  /// an in-app rationale before sending the user to the system settings.
+  ///
+  /// - iOS/macOS: `true` only when the authorization status is "Always".
+  /// - Android: reflects the `ACCESS_BACKGROUND_LOCATION` runtime permission on
+  ///   API 29+ (Android 10). On older versions background access is implied by
+  ///   the foreground grant, so this mirrors [hasPermission].
+  /// - Web: always `false`.
+  @override
+  Future<bool> isBackgroundPermissionGranted() {
+    return LocationPlatform.instance.isBackgroundPermissionGranted();
   }
 
   /// Checks if the location service is enabled.
@@ -114,6 +174,17 @@ class Location implements LocationPlatform {
   /// the sub text will be set to [description]. The notification [color] can
   /// also be customized.
   ///
+  /// A large icon (image) can be shown by providing [imageName], which is
+  /// resolved to a drawable resource in the same way as [iconName]. If no
+  /// matching resource is found, no large icon is shown.
+  ///
+  /// [iconBytes]/[imageBytes] are an alternative to [iconName]/[imageName]
+  /// for apps that don't want to manually add a drawable resource to their
+  /// Android project (e.g. to render a Flutter icon to PNG bytes at runtime
+  /// instead) — decoded directly into the small/large icon bitmap. When both
+  /// are provided for the same icon, the bytes take precedence over the
+  /// resource name.
+  ///
   /// When [onTapBringToFront] is set to true, tapping the notification will
   /// bring the activity back to the front.
   ///
@@ -131,6 +202,9 @@ class Location implements LocationPlatform {
     String? channelName,
     String? title,
     String? iconName,
+    String? imageName,
+    Uint8List? iconBytes,
+    Uint8List? imageBytes,
     String? subtitle,
     String? description,
     Color? color,
@@ -140,6 +214,9 @@ class Location implements LocationPlatform {
       channelName: channelName,
       title: title,
       iconName: iconName,
+      imageName: imageName,
+      iconBytes: iconBytes,
+      imageBytes: imageBytes,
       subtitle: subtitle,
       description: description,
       color: color,

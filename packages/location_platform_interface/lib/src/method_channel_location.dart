@@ -38,12 +38,18 @@ class MethodChannelLocation extends LocationPlatform {
   /// often a new location is sent through [onLocationChanged]. The
   /// [pausesLocationUpdatesAutomatically] argument indicates whether the
   /// underlying location manager object may pause location updates.
+  ///
+  /// [backgroundInterval] (in milliseconds, Android only) sets a different
+  /// update interval to use while background mode is enabled. When null,
+  /// [interval] is used in the background as well. Ignored on iOS, macOS and
+  /// web.
   @override
   Future<bool> changeSettings({
     LocationAccuracy? accuracy = LocationAccuracy.high,
     int? interval = 1000,
     double? distanceFilter = 0,
     bool? pausesLocationUpdatesAutomatically = true,
+    int? backgroundInterval,
   }) async {
     final result = await _methodChannel!.invokeMethod(
       'changeSettings',
@@ -53,6 +59,7 @@ class MethodChannelLocation extends LocationPlatform {
         'distanceFilter': distanceFilter,
         'pausesLocationUpdatesAutomatically':
             pausesLocationUpdatesAutomatically,
+        'backgroundInterval': backgroundInterval,
       },
     );
 
@@ -69,10 +76,16 @@ class MethodChannelLocation extends LocationPlatform {
 
   /// Enables or disables service in the background mode.
   @override
-  Future<bool> enableBackgroundMode({bool? enable}) async {
+  Future<bool> enableBackgroundMode({
+    bool? enable,
+    bool requireBackgroundPermission = true,
+  }) async {
     final result = await _methodChannel!.invokeMethod(
       'enableBackgroundMode',
-      <String, dynamic>{'enable': enable},
+      <String, dynamic>{
+        'enable': enable,
+        'requireBackgroundPermission': requireBackgroundPermission,
+      },
     );
 
     return result == 1;
@@ -95,6 +108,19 @@ class MethodChannelLocation extends LocationPlatform {
     return LocationData.fromMap(resultMap);
   }
 
+  /// Gets the most recently cached location of the user, if any.
+  ///
+  /// Returns `null` when no cached location is available.
+  @override
+  Future<LocationData?> getLastKnownLocation() async {
+    final resultMap = await _methodChannel!
+        .invokeMapMethod<String, dynamic>('getLastKnownLocation');
+    if (resultMap == null) {
+      return null;
+    }
+    return LocationData.fromMap(resultMap);
+  }
+
   @override
   Future<PermissionStatus> hasPermission() async {
     final result = await _methodChannel!.invokeMethod('hasPermission');
@@ -105,6 +131,13 @@ class MethodChannelLocation extends LocationPlatform {
   Future<PermissionStatus> requestPermission() async {
     final result = await _methodChannel!.invokeMethod('requestPermission');
     return _parsePermissionStatus(result as int?);
+  }
+
+  @override
+  Future<bool> isBackgroundPermissionGranted() async {
+    final result =
+        await _methodChannel!.invokeMethod('isBackgroundPermissionGranted');
+    return result == 1;
   }
 
   PermissionStatus _parsePermissionStatus(int? result) {
@@ -167,6 +200,10 @@ class MethodChannelLocation extends LocationPlatform {
   /// the sub text will be set to [description]. The notification [color] can
   /// also be customized.
   ///
+  /// A large icon (image) can be shown by providing [imageName], which is
+  /// resolved to a drawable resource in the same way as [iconName]. If no
+  /// matching resource is found, no large icon is shown.
+  ///
   /// When [onTapBringToFront] is set to true, tapping the notification will
   /// bring the activity back to the front.
   ///
@@ -184,6 +221,9 @@ class MethodChannelLocation extends LocationPlatform {
     String? channelName,
     String? title,
     String? iconName,
+    String? imageName,
+    Uint8List? iconBytes,
+    Uint8List? imageBytes,
     String? subtitle,
     String? description,
     Color? color,
@@ -200,6 +240,18 @@ class MethodChannelLocation extends LocationPlatform {
       'title': title,
       'iconName': iconName,
     };
+
+    if (imageName != null) {
+      data['imageName'] = imageName;
+    }
+
+    if (iconBytes != null) {
+      data['iconBytes'] = iconBytes;
+    }
+
+    if (imageBytes != null) {
+      data['imageBytes'] = imageBytes;
+    }
 
     if (subtitle != null) {
       data['subtitle'] = subtitle;

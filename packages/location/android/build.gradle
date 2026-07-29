@@ -9,9 +9,9 @@ buildscript {
     }
 
     dependencies {
-        classpath("com.android.tools.build:gradle:8.8.0")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
-        classpath("org.jlleitschuh.gradle:ktlint-gradle:11.5.0")
+        classpath("com.android.tools.build:gradle:8.11.1")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.20")
+        classpath("org.jlleitschuh.gradle:ktlint-gradle:12.1.2")
     }
 }
 
@@ -21,21 +21,29 @@ repositories {
 }
 
 apply plugin: "com.android.library"
-apply plugin: "org.jetbrains.kotlin.android"
+
+// AGP 9 ships built-in Kotlin support, but it can be turned off with the
+// `android.builtInKotlin` Gradle property. Only skip applying the standalone
+// Kotlin Gradle plugin when built-in Kotlin is actually active; otherwise the
+// `kotlin { }` block below would have no backing extension. Mirrors the logic
+// used by other Flutter plugins (e.g. file_picker).
+def agpMajor = Integer.parseInt(com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION.split("\\.")[0])
+def builtInKotlinProperty = providers.gradleProperty("android.builtInKotlin").orNull
+def builtInKotlinEnabled = agpMajor >= 9 &&
+    (builtInKotlinProperty == null || builtInKotlinProperty.toBoolean())
+if (!builtInKotlinEnabled) {
+    apply plugin: "org.jetbrains.kotlin.android"
+}
+
 apply plugin: "org.jlleitschuh.gradle.ktlint"
 
 android {
     namespace = "com.lyokone.location"
-    compileSdk = 35
+    compileSdk = 36
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
-    }
-
-    kotlinOptions {
-        jvmTarget = "11"
-        // allWarningsAsErrors = true // TODO(bartekpacia): Re-enable
     }
 
     sourceSets {
@@ -45,12 +53,22 @@ android {
 
     defaultConfig {
         minSdk = 21
-        targetSdk = 35
+        targetSdk = 36
+    }
+}
+
+// Use the top-level `kotlin` DSL instead of `android.kotlinOptions` so that the
+// compiler options resolve both with KGP (AGP < 9) and with AGP 9's built-in
+// Kotlin, where the `kotlinOptions` block is no longer available.
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
+        // allWarningsAsErrors = true // TODO(bartekpacia): Re-enable
     }
 }
 
 dependencies {
-    compileOnly("androidx.annotation:annotation:1.6.0")
-    implementation("androidx.core:core-ktx:1.13.1")
+    compileOnly("androidx.annotation:annotation:1.8.1")
+    implementation("androidx.core:core-ktx:1.16.0")
     api("com.google.android.gms:play-services-location:21.3.0")
 }
