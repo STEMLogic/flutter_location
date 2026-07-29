@@ -7,7 +7,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -238,14 +237,10 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
 
     fun checkBackgroundPermissions(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            activity?.let {
-                val locationPermissionState =
-                    ActivityCompat.checkSelfPermission(
-                        it,
-                        Manifest.permission.ACCESS_BACKGROUND_LOCATION,
-                    )
-                locationPermissionState == PackageManager.PERMISSION_GRANTED
-            } ?: throw ActivityNotFoundException()
+            ActivityCompat.checkSelfPermission(
+                applicationContext,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+            ) == PackageManager.PERMISSION_GRANTED
         } else {
             location?.checkPermissions() ?: false
         }
@@ -262,7 +257,28 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
                     ),
                     REQUEST_PERMISSIONS_REQUEST_CODE,
                 )
-            } ?: throw ActivityNotFoundException()
+            } ?: run {
+                // Without an Activity we can't show the system permission dialog.
+                // Surface the current grant state instead of crashing.
+                if (checkBackgroundPermissions()) {
+                    if (enableBackgroundMode()) {
+                        result?.success(1)
+                    } else {
+                        result?.error(
+                            "ENABLE_BACKGROUND_MODE_ERROR",
+                            "Failed to start the foreground service",
+                            null,
+                        )
+                    }
+                } else {
+                    result?.error(
+                        "PERMISSION_DENIED",
+                        "Background location permission not granted",
+                        null,
+                    )
+                }
+                result = null
+            }
         } else {
             location?.result = this.result
             location?.requestPermissions()
@@ -374,8 +390,11 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
     private fun shouldShowRequestBackgroundPermissionRationale(): Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             activity?.let {
-                ActivityCompat.shouldShowRequestPermissionRationale(it, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-            } ?: throw ActivityNotFoundException()
+                ActivityCompat.shouldShowRequestPermissionRationale(
+                    it,
+                    Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+                )
+            } ?: !checkBackgroundPermissions()
         } else {
             false
         }

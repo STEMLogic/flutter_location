@@ -6,16 +6,29 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.util.Log
+import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 
-/** LocationPlugin */
+/**
+ * LocationPlugin
+ *
+ * STEMLogic fork notes:
+ * - Only attach against the app's cached "SharedEngine" so Firebase's background
+ *   FlutterEngine does not steal/tear down the location service binding.
+ * - Bind the location service from the application context so location keeps
+ *   working without an Activity (headless / vehicle platforms).
+ * - ActivityAware is still used for permission/settings UI when an Activity is
+ *   available, but activity detach must not unbind or dispose the service.
+ */
 class LocationPlugin : FlutterPlugin, ActivityAware {
     private var methodCallHandler: MethodCallHandlerImpl? = null
     private var streamHandlerImpl: StreamHandlerImpl? = null
     private var locationService: FlutterLocationService? = null
     private var activityBinding: ActivityPluginBinding? = null
+    private var applicationContext: Context? = null
+    private var serviceBound = false
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -35,6 +48,19 @@ class LocationPlugin : FlutterPlugin, ActivityAware {
         }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        // Only initialize if the shared engine is being used.
+        val sharedEngine = FlutterEngineCache.getInstance().get(SHARED_ENGINE_ID)
+        if (sharedEngine == null || sharedEngine != binding.flutterEngine) {
+            Log.d(TAG, "Skipping attach: binding engine is not SharedEngine")
+            return
+        }
+
+        if (applicationContext != null) {
+            return
+        }
+
+        applicationContext = binding.applicationContext
+
         methodCallHandler =
             MethodCallHandlerImpl().apply {
                 startListening(binding.binaryMessenger)
@@ -43,28 +69,65 @@ class LocationPlugin : FlutterPlugin, ActivityAware {
             StreamHandlerImpl().apply {
                 startListening(binding.binaryMessenger)
             }
+
+        val context = applicationContext ?: return
+        context.bindService(
+            Intent(context, FlutterLocationService::class.java),
+            serviceConnection,
+            Context.BIND_AUTO_CREATE,
+        )
+        serviceBound = true
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        methodCallHandler?.stopListening()
+        // Ignore detach from non-shared engines (e.g. Firebase background engine).
+        val sharedEngine = FlutterEngineCache.getInstance().get(SHARED_ENGINE_ID)
+        if (sharedEngine != null && sharedEngine != binding.flutterEngine) {
+            return
+        }
+
+        methodCallHandler?.apply {
+            setLocationService(null)
+            setLocation(null)
+            stopListening()
+        }
         methodCallHandler = null
-        streamHandlerImpl?.stopListening()
+
+        streamHandlerImpl?.apply {
+            setLocation(null)
+            stopListening()
+        }
         streamHandlerImpl = null
+
+        if (serviceBound) {
+            applicationContext?.unbindService(serviceConnection)
+            serviceBound = false
+        }
+        locationService = null
+        applicationContext = null
     }
 
     private fun attachToActivity(binding: ActivityPluginBinding) {
         activityBinding = binding
-        binding.activity.bindService(
-            Intent(binding.activity, FlutterLocationService::class.java),
-            serviceConnection,
-            Context.BIND_AUTO_CREATE,
-        )
+        locationService?.let { service ->
+            service.setActivity(binding.activity)
+            service.locationActivityResultListener?.let(binding::addActivityResultListener)
+            service.locationRequestPermissionsResultListener?.let(binding::addRequestPermissionsResultListener)
+            binding.addRequestPermissionsResultListener(service.serviceRequestPermissionsResultListener)
+        }
     }
 
     private fun detachActivity() {
-        dispose()
-
-        activityBinding?.activity?.unbindService(serviceConnection)
+        val service = locationService
+        activityBinding?.let { binding ->
+            if (service != null) {
+                binding.removeRequestPermissionsResultListener(service.serviceRequestPermissionsResultListener)
+                service.locationRequestPermissionsResultListener?.let(binding::removeRequestPermissionsResultListener)
+                service.locationActivityResultListener?.let(binding::removeActivityResultListener)
+            }
+        }
+        // Keep the service and fused client alive without an Activity.
+        locationService?.setActivity(null)
         activityBinding = null
     }
 
@@ -85,11 +148,13 @@ class LocationPlugin : FlutterPlugin, ActivityAware {
     }
 
     private fun initialize(service: FlutterLocationService) {
+        if (locationService != null) {
+            return
+        }
         locationService = service
 
-        service.setActivity(activityBinding?.activity)
-
         activityBinding?.let { binding ->
+            service.setActivity(binding.activity)
             service.locationActivityResultListener?.let(binding::addActivityResultListener)
             service.locationRequestPermissionsResultListener?.let(binding::addRequestPermissionsResultListener)
             binding.addRequestPermissionsResultListener(service.serviceRequestPermissionsResultListener)
@@ -97,28 +162,11 @@ class LocationPlugin : FlutterPlugin, ActivityAware {
 
         methodCallHandler?.setLocation(service.location)
         methodCallHandler?.setLocationService(service)
-
         streamHandlerImpl?.setLocation(service.location)
-    }
-
-    private fun dispose() {
-        streamHandlerImpl?.setLocation(null)
-
-        methodCallHandler?.setLocationService(null)
-        methodCallHandler?.setLocation(null)
-
-        val service = locationService ?: return
-        activityBinding?.let { binding ->
-            binding.removeRequestPermissionsResultListener(service.serviceRequestPermissionsResultListener)
-            service.locationRequestPermissionsResultListener?.let(binding::removeRequestPermissionsResultListener)
-            service.locationActivityResultListener?.let(binding::removeActivityResultListener)
-        }
-
-        service.setActivity(null)
-        locationService = null
     }
 
     companion object {
         private const val TAG = "LocationPlugin"
+        private const val SHARED_ENGINE_ID = "SharedEngine"
     }
 }

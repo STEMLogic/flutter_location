@@ -52,22 +52,14 @@ class FlutterLocation(
     activity: Activity?,
 ) : PluginRegistry.RequestPermissionsResultListener,
     PluginRegistry.ActivityResultListener {
+    // Activity is optional: used for permission / settings UI. Location updates
+    // are initialized against applicationContext so they keep working when no
+    // Activity is attached (STEMLogic headless / SharedEngine use case).
     var activity: Activity? = activity
         set(value) {
             field = value
             if (value != null) {
-                // Only wire up the Google Play services fused provider when GMS is
-                // actually available. On devices without GMS (Huawei, some Chinese
-                // ROMs, AOSP) touching LocationServices throws SERVICE_INVALID, so
-                // we fall back to the Android framework LocationManager instead.
-                if (isGooglePlayServicesAvailable) {
-                    mFusedLocationClient = LocationServices.getFusedLocationProviderClient(value)
-                    mSettingsClient = LocationServices.getSettingsClient(value)
-                }
-
-                createLocationCallback()
-                createLocationRequest()
-                buildLocationSettingsRequest()
+                ensureLocationServicesInitialized()
                 unregisterLocationProvidersChangedReceiver()
                 ContextCompat.registerReceiver(
                     applicationContext,
@@ -75,17 +67,30 @@ class FlutterLocation(
                     IntentFilter(LocationManager.PROVIDERS_CHANGED_ACTION),
                     ContextCompat.RECEIVER_NOT_EXPORTED,
                 )
-            } else {
-                stopLocationUpdates()
-                mFusedLocationClient = null
-                mSettingsClient = null
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    mMessageListener?.let { locationManager.removeNmeaListener(it) }
-                    mMessageListener = null
-                }
-                unregisterLocationProvidersChangedReceiver()
             }
+            // Do not tear down the fused client when Activity detaches.
         }
+
+    private fun ensureLocationServicesInitialized() {
+        // Only wire up the Google Play services fused provider when GMS is
+        // actually available. On devices without GMS (Huawei, some Chinese
+        // ROMs, AOSP) touching LocationServices throws SERVICE_INVALID, so
+        // we fall back to the Android framework LocationManager instead.
+        if (isGooglePlayServicesAvailable && mFusedLocationClient == null) {
+            mFusedLocationClient =
+                LocationServices.getFusedLocationProviderClient(applicationContext)
+            mSettingsClient = LocationServices.getSettingsClient(applicationContext)
+        }
+        if (mLocationCallback == null) {
+            createLocationCallback()
+        }
+        if (mLocationRequest == null) {
+            createLocationRequest()
+        }
+        if (mLocationSettingsRequest == null) {
+            buildLocationSettingsRequest()
+        }
+    }
 
     private fun unregisterLocationProvidersChangedReceiver() {
         try {
@@ -164,6 +169,10 @@ class FlutterLocation(
     private val isGooglePlayServicesAvailable: Boolean =
         GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(applicationContext) ==
             ConnectionResult.SUCCESS
+
+    init {
+        ensureLocationServicesInitialized()
+    }
 
     /**
      * Framework [LocationManager] listener used only when GMS is unavailable.
@@ -506,7 +515,7 @@ class FlutterLocation(
         }
         val client = mFusedLocationClient
         if (client == null) {
-            result.error("MISSING_ACTIVITY", "Location is not attached to an activity.", null)
+            result.error("LOCATION_ERROR", "Location services are not initialized.", null)
             return
         }
         try {
@@ -584,17 +593,18 @@ class FlutterLocation(
 
     /** Returns the current state of the permissions needed. */
     fun checkPermissions(): Boolean {
-        val activity = this.activity
-        if (activity == null) {
-            result?.error("MISSING_ACTIVITY", "You should not checkPermissions activation outside of an activity.", null)
-            throw ActivityNotFoundException()
-        }
         // Approximate (coarse) location counts as granted: a user who only
         // allows approximate location should still receive updates (#991).
         val fineState =
-            ActivityCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_FINE_LOCATION)
+            ActivityCompat.checkSelfPermission(
+                applicationContext,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+            )
         val coarseState =
-            ActivityCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_COARSE_LOCATION)
+            ActivityCompat.checkSelfPermission(
+                applicationContext,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+            )
         return fineState == PackageManager.PERMISSION_GRANTED ||
             coarseState == PackageManager.PERMISSION_GRANTED
     }
@@ -613,25 +623,24 @@ class FlutterLocation(
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             return checkPermissions()
         }
-        val activity = this.activity
-        if (activity == null) {
-            result?.error("MISSING_ACTIVITY", "You should not checkPermissions activation outside of an activity.", null)
-            throw ActivityNotFoundException()
-        }
-        return ActivityCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
+        return ActivityCompat.checkSelfPermission(
+            applicationContext,
+            Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun hasFineLocationPermission(): Boolean {
-        val activity = this.activity ?: return false
-        return ActivityCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_FINE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
+        return ActivityCompat.checkSelfPermission(
+            applicationContext,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun hasCoarseLocationPermission(): Boolean {
-        val activity = this.activity ?: return false
-        return ActivityCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_COARSE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
+        return ActivityCompat.checkSelfPermission(
+            applicationContext,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     /**
@@ -754,11 +763,6 @@ class FlutterLocation(
     }
 
     fun startRequestingLocation() {
-        val activity = this.activity
-        if (activity == null) {
-            result?.error("MISSING_ACTIVITY", "You should not requestLocation activation outside of an activity.", null)
-            throw ActivityNotFoundException()
-        }
         if (!isGooglePlayServicesAvailable) {
             // No GMS: skip the fused-provider settings check (which would throw
             // SERVICE_INVALID) and request directly from the framework providers.
@@ -766,6 +770,16 @@ class FlutterLocation(
             requestLocationUpdatesFramework()
             return
         }
+
+        val activity = this.activity
+        if (activity == null) {
+            // No Activity (headless / SharedEngine): skip settings-resolution UI
+            // and request updates directly with the application-context client.
+            registerNmeaListener()
+            requestLocationUpdates()
+            return
+        }
+
         val settingsRequest = mLocationSettingsRequest ?: return
         mSettingsClient?.checkLocationSettings(settingsRequest)
             ?.addOnSuccessListener(activity) {
