@@ -2,7 +2,6 @@ package com.lyokone.location
 
 import android.Manifest
 import android.app.Activity
-import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -664,8 +663,13 @@ class FlutterLocation(
     fun requestPermissions() {
         val activity = this.activity
         if (activity == null) {
-            result?.error("MISSING_ACTIVITY", "You should not requestPermissions activation outside of an activity.", null)
-            throw ActivityNotFoundException()
+            // Headless / SharedEngine: surface a Flutter error instead of crashing.
+            result?.error(
+                "MISSING_ACTIVITY",
+                "You should not requestPermissions activation outside of an activity.",
+                null,
+            )
+            return
         }
         if (checkPermissions()) {
             result?.success(permissionStatusCode())
@@ -709,8 +713,13 @@ class FlutterLocation(
     fun requestService(requestServiceResult: Result) {
         val activity = this.activity
         if (activity == null) {
-            requestServiceResult.error("MISSING_ACTIVITY", "You should not requestService activation outside of an activity.", null)
-            throw ActivityNotFoundException()
+            // Headless / SharedEngine: surface a Flutter error instead of crashing.
+            requestServiceResult.error(
+                "MISSING_ACTIVITY",
+                "You should not requestService activation outside of an activity.",
+                null,
+            )
+            return
         }
         try {
             if (checkServiceEnabled()) {

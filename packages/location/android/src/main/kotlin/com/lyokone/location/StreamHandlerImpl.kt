@@ -51,12 +51,18 @@ internal class StreamHandlerImpl : StreamHandler {
     ) {
         val location = this.location ?: return
         location.events = eventsSink
-        if (location.activity == null) {
-            eventsSink.error("NO_ACTIVITY", null, null)
-            return
-        }
 
         if (!location.checkPermissions()) {
+            // System permission UI needs an Activity. Headless / SharedEngine
+            // (CarPlay, Android Auto) can still stream when already authorized.
+            if (location.activity == null) {
+                eventsSink.error(
+                    "NO_ACTIVITY",
+                    "Cannot request location permission without an Activity.",
+                    null,
+                )
+                return
+            }
             location.requestPermissions()
             return
         }
