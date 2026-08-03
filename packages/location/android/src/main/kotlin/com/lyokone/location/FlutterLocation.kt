@@ -664,11 +664,13 @@ class FlutterLocation(
         val activity = this.activity
         if (activity == null) {
             // Headless / SharedEngine: surface a Flutter error instead of crashing.
-            result?.error(
-                "MISSING_ACTIVITY",
-                "You should not requestPermissions activation outside of an activity.",
-                null,
-            )
+            // Also complete any pending getLocation / stream waiters (not only
+            // the dedicated requestPermission Result).
+            val message =
+                "You should not requestPermissions activation outside of an activity."
+            sendError("MISSING_ACTIVITY", message, null)
+            result?.error("MISSING_ACTIVITY", message, null)
+            result = null
             return
         }
         if (checkPermissions()) {

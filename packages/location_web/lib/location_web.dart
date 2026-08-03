@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:js_interop';
+import 'dart:typed_data';
+import 'dart:ui' show Color;
 
 import 'package:flutter/services.dart';
 import 'package:flutter_web_plugins/flutter_web_plugins.dart';
@@ -133,6 +135,9 @@ class LocationWebPlugin extends LocationPlatform {
         // POSITION_UNAVAILABLE/TIMEOUT error) once the user has already
         // allowed access, so assuming denial here would misreport an
         // unrelated location-fetch failure as a permission rejection.
+        if (_permissions.isUndefinedOrNull) {
+          return PermissionStatus.granted;
+        }
         return hasPermission();
       }
       return PermissionStatus.deniedForever;

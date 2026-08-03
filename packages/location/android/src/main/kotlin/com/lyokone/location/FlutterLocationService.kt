@@ -248,37 +248,73 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
 
     fun requestBackgroundPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            activity?.let {
-                ActivityCompat.requestPermissions(
-                    it,
-                    arrayOf(
-                        Manifest.permission.ACCESS_FINE_LOCATION,
-                        Manifest.permission.ACCESS_BACKGROUND_LOCATION,
-                    ),
-                    REQUEST_PERMISSIONS_REQUEST_CODE,
-                )
-            } ?: run {
-                // Without an Activity we can't show the system permission dialog.
-                // Surface the current grant state instead of crashing.
-                if (checkBackgroundPermissions()) {
-                    if (enableBackgroundMode()) {
-                        result?.success(1)
+            val activity =
+                activity ?: run {
+                    // Without an Activity we can't show the system permission dialog.
+                    // Surface the current grant state instead of crashing.
+                    if (checkBackgroundPermissions()) {
+                        if (enableBackgroundMode()) {
+                            result?.success(1)
+                        } else {
+                            result?.error(
+                                "ENABLE_BACKGROUND_MODE_ERROR",
+                                "Failed to start the foreground service",
+                                null,
+                            )
+                        }
                     } else {
                         result?.error(
-                            "ENABLE_BACKGROUND_MODE_ERROR",
-                            "Failed to start the foreground service",
+                            "PERMISSION_DENIED",
+                            "Background location permission not granted",
                             null,
                         )
                     }
-                } else {
-                    result?.error(
-                        "PERMISSION_DENIED",
-                        "Background location permission not granted",
-                        null,
-                    )
+                    result = null
+                    return
                 }
-                result = null
+
+            val location = this.location
+            // Android 11+: background must be requested alone, after foreground.
+            if (location != null && !location.checkPermissions()) {
+                val enableResult = result
+                location.result =
+                    object : MethodChannel.Result {
+                        override fun success(res: Any?) {
+                            if (location.checkPermissions()) {
+                                requestBackgroundPermissions()
+                            } else {
+                                enableResult?.error(
+                                    "PERMISSION_DENIED",
+                                    "Location permission denied",
+                                    null,
+                                )
+                                result = null
+                            }
+                        }
+
+                        override fun error(
+                            errorCode: String,
+                            errorMessage: String?,
+                            errorDetails: Any?,
+                        ) {
+                            enableResult?.error(errorCode, errorMessage, errorDetails)
+                            result = null
+                        }
+
+                        override fun notImplemented() {
+                            enableResult?.notImplemented()
+                            result = null
+                        }
+                    }
+                location.requestPermissions()
+                return
             }
+
+            ActivityCompat.requestPermissions(
+                activity,
+                arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+                REQUEST_PERMISSIONS_REQUEST_CODE,
+            )
         } else {
             location?.result = this.result
             location?.requestPermissions()
@@ -360,31 +396,59 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
         permissions: Array<out String>,
         grantResults: IntArray,
     ): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && requestCode == REQUEST_PERMISSIONS_REQUEST_CODE && permissions.size == 2 &&
-            permissions[0] == Manifest.permission.ACCESS_FINE_LOCATION && permissions[1] == Manifest.permission.ACCESS_BACKGROUND_LOCATION
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            requestCode != REQUEST_PERMISSIONS_REQUEST_CODE
         ) {
-            if (grantResults[0] == PackageManager.PERMISSION_GRANTED && grantResults[1] == PackageManager.PERMISSION_GRANTED) {
-                // Permissions granted, background mode can be enabled
-                if (enableBackgroundMode()) {
-                    result?.success(1)
-                } else {
-                    result?.error("ENABLE_BACKGROUND_MODE_ERROR", "Failed to start the foreground service", null)
-                }
-                result = null
-            } else {
-                if (!shouldShowRequestBackgroundPermissionRationale()) {
-                    result?.error(
-                        "PERMISSION_DENIED_NEVER_ASK",
-                        "Background location permission denied forever - please open app settings",
-                        null,
-                    )
-                } else {
-                    result?.error("PERMISSION_DENIED", "Background location permission denied", null)
-                }
-                result = null
-            }
+            return false
         }
-        return false
+
+        // Android 11+: background is requested alone (after foreground).
+        val backgroundOnly =
+            permissions.size == 1 &&
+                permissions[0] == Manifest.permission.ACCESS_BACKGROUND_LOCATION
+        // Legacy combined request (pre-fix / older clients).
+        val combined =
+            permissions.size == 2 &&
+                permissions[0] == Manifest.permission.ACCESS_FINE_LOCATION &&
+                permissions[1] == Manifest.permission.ACCESS_BACKGROUND_LOCATION
+
+        if (!backgroundOnly && !combined) {
+            return false
+        }
+
+        val backgroundGranted =
+            if (backgroundOnly) {
+                grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            } else {
+                grantResults.size >= 2 &&
+                    grantResults[0] == PackageManager.PERMISSION_GRANTED &&
+                    grantResults[1] == PackageManager.PERMISSION_GRANTED
+            }
+
+        if (backgroundGranted) {
+            if (enableBackgroundMode()) {
+                result?.success(1)
+            } else {
+                result?.error(
+                    "ENABLE_BACKGROUND_MODE_ERROR",
+                    "Failed to start the foreground service",
+                    null,
+                )
+            }
+            result = null
+        } else {
+            if (!shouldShowRequestBackgroundPermissionRationale()) {
+                result?.error(
+                    "PERMISSION_DENIED_NEVER_ASK",
+                    "Background location permission denied forever - please open app settings",
+                    null,
+                )
+            } else {
+                result?.error("PERMISSION_DENIED", "Background location permission denied", null)
+            }
+            result = null
+        }
+        return true
     }
 
     private fun shouldShowRequestBackgroundPermissionRationale(): Boolean =

@@ -49,7 +49,15 @@ internal class StreamHandlerImpl : StreamHandler {
         arguments: Any?,
         eventsSink: EventSink,
     ) {
-        val location = this.location ?: return
+        val location = this.location
+        if (location == null) {
+            eventsSink.error(
+                "SERVICE_NOT_READY",
+                "Location service is not connected yet.",
+                null,
+            )
+            return
+        }
         location.events = eventsSink
 
         if (!location.checkPermissions()) {

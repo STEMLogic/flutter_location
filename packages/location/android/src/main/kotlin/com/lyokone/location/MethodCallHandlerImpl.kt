@@ -8,6 +8,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import java.util.Collections
 
 private const val METHOD_CHANNEL_NAME = "lyokone/location"
 
@@ -16,12 +17,18 @@ internal class MethodCallHandlerImpl : MethodCallHandler {
     private var locationService: FlutterLocationService? = null
     private var channel: MethodChannel? = null
 
+    // Channel is registered before bindService completes; queue until ready.
+    private val pendingCalls =
+        Collections.synchronizedList(mutableListOf<Pair<MethodCall, Result>>())
+
     fun setLocation(location: FlutterLocation?) {
         this.location = location
+        flushPendingCallsIfReady()
     }
 
     fun setLocationService(locationService: FlutterLocationService?) {
         this.locationService = locationService
+        flushPendingCallsIfReady()
     }
 
     override fun onMethodCall(
@@ -30,9 +37,33 @@ internal class MethodCallHandlerImpl : MethodCallHandler {
     ) {
         val location = this.location
         if (location == null) {
-            result.error("NO_ACTIVITY", "Location is not attached to an activity.", null)
+            // Service still binding — not a missing Activity.
+            pendingCalls.add(call to result)
             return
         }
+        dispatch(call, result, location)
+    }
+
+    private fun flushPendingCallsIfReady() {
+        val location = this.location ?: return
+        val queued: List<Pair<MethodCall, Result>>
+        synchronized(pendingCalls) {
+            if (pendingCalls.isEmpty()) {
+                return
+            }
+            queued = pendingCalls.toList()
+            pendingCalls.clear()
+        }
+        queued.forEach { (call, result) ->
+            dispatch(call, result, location)
+        }
+    }
+
+    private fun dispatch(
+        call: MethodCall,
+        result: Result,
+        location: FlutterLocation,
+    ) {
         when (call.method) {
             "changeSettings" -> onChangeSettings(call, result, location)
             "getLocation" -> onGetLocation(result, location)
@@ -76,6 +107,17 @@ internal class MethodCallHandlerImpl : MethodCallHandler {
 
         channel.setMethodCallHandler(null)
         this.channel = null
+
+        synchronized(pendingCalls) {
+            pendingCalls.forEach { (_, result) ->
+                result.error(
+                    "SERVICE_DISCONNECTED",
+                    "Location service was disposed before the call completed.",
+                    null,
+                )
+            }
+            pendingCalls.clear()
+        }
     }
 
     private fun onChangeSettings(
@@ -113,12 +155,15 @@ internal class MethodCallHandlerImpl : MethodCallHandler {
         result: Result,
         location: FlutterLocation,
     ) {
-        location.getLocationResults.add(result)
         if (!location.checkPermissions()) {
+            // requestPermissions only reports via location.result / sendError —
+            // queue this Future first so a missing-Activity path can complete it.
+            location.getLocationResults.add(result)
             location.requestPermissions()
-        } else {
-            location.startRequestingLocation()
+            return
         }
+        location.getLocationResults.add(result)
+        location.startRequestingLocation()
     }
 
     private fun onHasPermission(
