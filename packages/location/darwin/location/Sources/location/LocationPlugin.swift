@@ -338,9 +338,26 @@ public class LocationPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, CLLo
         }
         #endif
 
-        NSLog(
-            "[Location] Missing NSLocationWhenInUseUsageDescription (or NSLocationAlwaysAndWhenInUseUsageDescription) "
-                + "in Info.plist; the location permission cannot be requested.")
+        // Without a usage-description key, Core Location will not prompt and
+        // authorizationStatus never changes — so requestPermission / getLocation /
+        // stream waiters would hang forever if we only logged.
+        let message =
+            "Missing NSLocationWhenInUseUsageDescription (or NSLocationAlwaysAndWhenInUseUsageDescription) "
+                + "in Info.plist; the location permission cannot be requested."
+        NSLog("[Location] \(message)")
+        let error = FlutterError(code: "PERMISSION_MISSING_USAGE_DESCRIPTION", message: message, details: nil)
+        if permissionWanted {
+            permissionWanted = false
+            flutterResult?(error)
+            flutterResult = nil
+        }
+        if !pendingLocationResults.isEmpty {
+            pendingLocationResults.forEach { $0(error) }
+            pendingLocationResults.removeAll()
+        }
+        if flutterListening {
+            flutterEventSink?(error)
+        }
     }
 
     private var currentAuthorizationStatus: CLAuthorizationStatus {
