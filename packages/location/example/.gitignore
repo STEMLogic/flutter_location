@@ -33,6 +33,10 @@
 # Web related
 lib/generated_plugin_registrant.dart
 
+test_bundle.dart
+/playwright-report/
+/test-results/
+
 # Symbolication related
 app.*.symbols
 

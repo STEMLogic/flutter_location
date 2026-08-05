@@ -1,0 +1,315 @@
+package com.lyokone.location
+
+import android.graphics.Color
+import android.os.Build
+import android.util.Log
+import io.flutter.plugin.common.BinaryMessenger
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.MethodChannel.MethodCallHandler
+import io.flutter.plugin.common.MethodChannel.Result
+import java.util.Collections
+
+private const val METHOD_CHANNEL_NAME = "lyokone/location"
+
+internal class MethodCallHandlerImpl : MethodCallHandler {
+    private var location: FlutterLocation? = null
+    private var locationService: FlutterLocationService? = null
+    private var channel: MethodChannel? = null
+
+    // Channel is registered before bindService completes; queue until ready.
+    private val pendingCalls =
+        Collections.synchronizedList(mutableListOf<Pair<MethodCall, Result>>())
+
+    fun setLocation(location: FlutterLocation?) {
+        this.location = location
+        flushPendingCallsIfReady()
+    }
+
+    fun setLocationService(locationService: FlutterLocationService?) {
+        this.locationService = locationService
+        flushPendingCallsIfReady()
+    }
+
+    override fun onMethodCall(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val location = this.location
+        if (location == null) {
+            // Service still binding — not a missing Activity.
+            pendingCalls.add(call to result)
+            return
+        }
+        dispatch(call, result, location)
+    }
+
+    private fun flushPendingCallsIfReady() {
+        val location = this.location ?: return
+        val queued: List<Pair<MethodCall, Result>>
+        synchronized(pendingCalls) {
+            if (pendingCalls.isEmpty()) {
+                return
+            }
+            queued = pendingCalls.toList()
+            pendingCalls.clear()
+        }
+        queued.forEach { (call, result) ->
+            dispatch(call, result, location)
+        }
+    }
+
+    private fun dispatch(
+        call: MethodCall,
+        result: Result,
+        location: FlutterLocation,
+    ) {
+        when (call.method) {
+            "changeSettings" -> onChangeSettings(call, result, location)
+            "getLocation" -> onGetLocation(result, location)
+            "getLastKnownLocation" -> location.getLastKnownLocation(result)
+            "hasPermission" -> onHasPermission(result, location)
+            "isBackgroundPermissionGranted" -> onIsBackgroundPermissionGranted(result, location)
+            "requestPermission" -> onRequestPermission(result, location)
+            "serviceEnabled" -> onServiceEnabled(result, location)
+            "requestService" -> location.requestService(result)
+            "isBackgroundModeEnabled" -> isBackgroundModeEnabled(result)
+            "enableBackgroundMode" -> enableBackgroundMode(call, result)
+            "changeNotificationOptions" -> onChangeNotificationOptions(call, result)
+            else -> result.notImplemented()
+        }
+    }
+
+    /**
+     * Registers this instance as a method call handler on the given [messenger].
+     */
+    fun startListening(messenger: BinaryMessenger) {
+        if (channel != null) {
+            Log.wtf(TAG, "Setting a method call handler before the last was disposed.")
+            stopListening()
+        }
+
+        channel =
+            MethodChannel(messenger, METHOD_CHANNEL_NAME).apply {
+                setMethodCallHandler(this@MethodCallHandlerImpl)
+            }
+    }
+
+    /**
+     * Clears this instance from listening to method calls.
+     */
+    fun stopListening() {
+        val channel = this.channel
+        if (channel == null) {
+            Log.d(TAG, "Tried to stop listening when no MethodChannel had been initialized.")
+            return
+        }
+
+        channel.setMethodCallHandler(null)
+        this.channel = null
+
+        synchronized(pendingCalls) {
+            pendingCalls.forEach { (_, result) ->
+                result.error(
+                    "SERVICE_DISCONNECTED",
+                    "Location service was disposed before the call completed.",
+                    null,
+                )
+            }
+            pendingCalls.clear()
+        }
+    }
+
+    private fun onChangeSettings(
+        call: MethodCall,
+        result: Result,
+        location: FlutterLocation,
+    ) {
+        try {
+            val locationAccuracy = location.mapFlutterAccuracy[call.argument<Int>("accuracy")!!]
+            val updateIntervalMilliseconds = call.argument<Int>("interval")!!.toLong()
+            val fastestUpdateIntervalMilliseconds = updateIntervalMilliseconds / 2
+            val distanceFilter = call.argument<Double>("distanceFilter")!!.toFloat()
+            // Optional, Android-only: interval used while in background mode.
+            val backgroundIntervalMilliseconds = call.argument<Int>("backgroundInterval")?.toLong()
+
+            location.changeSettings(
+                locationAccuracy,
+                updateIntervalMilliseconds,
+                fastestUpdateIntervalMilliseconds,
+                distanceFilter,
+                backgroundIntervalMilliseconds,
+            )
+
+            result.success(1)
+        } catch (e: Exception) {
+            result.error(
+                "CHANGE_SETTINGS_ERROR",
+                "An unexpected error happened during location settings change:" + e.message,
+                null,
+            )
+        }
+    }
+
+    private fun onGetLocation(
+        result: Result,
+        location: FlutterLocation,
+    ) {
+        if (!location.checkPermissions()) {
+            // requestPermissions only reports via location.result / sendError —
+            // queue this Future first so a missing-Activity path can complete it.
+            location.getLocationResults.add(result)
+            location.requestPermissions()
+            return
+        }
+        location.getLocationResults.add(result)
+        location.startRequestingLocation()
+    }
+
+    private fun onHasPermission(
+        result: Result,
+        location: FlutterLocation,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            result.success(1)
+            return
+        }
+
+        // permissionStatusCode() returns 1 (granted), 3 (grantedLimited,
+        // approximate-only on API 31+) or 0 (denied) (#736).
+        result.success(location.permissionStatusCode())
+    }
+
+    private fun onIsBackgroundPermissionGranted(
+        result: Result,
+        location: FlutterLocation,
+    ) {
+        result.success(if (location.checkBackgroundPermissions()) 1 else 0)
+    }
+
+    private fun onServiceEnabled(
+        result: Result,
+        location: FlutterLocation,
+    ) {
+        try {
+            result.success(if (location.checkServiceEnabled()) 1 else 0)
+        } catch (e: Exception) {
+            // Surface the real exception instead of a fixed, uninformative message
+            // (#1020) -- this was previously discarded, making the actual failure
+            // impossible to diagnose from a bug report alone.
+            result.error(
+                "SERVICE_STATUS_ERROR",
+                "Location service status couldn't be determined: ${e.message}",
+                e.stackTraceToString(),
+            )
+        }
+    }
+
+    private fun onRequestPermission(
+        result: Result,
+        location: FlutterLocation,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            result.success(1)
+            return
+        }
+
+        location.result = result
+        location.requestPermissions()
+    }
+
+    private fun isBackgroundModeEnabled(result: Result) {
+        val locationService = this.locationService
+        if (locationService != null) {
+            result.success(if (locationService.isInForegroundMode()) 1 else 0)
+        } else {
+            result.success(0)
+        }
+    }
+
+    private fun enableBackgroundMode(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val enable = call.argument<Boolean>("enable")
+        // A foreground service with FOREGROUND_SERVICE_TYPE_LOCATION retains
+        // location access while backgrounded without ACCESS_BACKGROUND_LOCATION
+        // ("Allow all the time") at all -- that permission is only required for
+        // location access outside of an active foreground service. Skipping this
+        // check lets callers opt into relying solely on the foreground-service
+        // exemption instead of forcing the stricter background permission (#600).
+        val requireBackgroundPermission =
+            call.argument<Boolean>("requireBackgroundPermission") ?: true
+        val locationService = this.locationService
+        if (locationService != null && enable != null) {
+            if (!requireBackgroundPermission || locationService.checkBackgroundPermissions()) {
+                if (enable) {
+                    if (locationService.enableBackgroundMode()) {
+                        result.success(1)
+                    } else {
+                        result.error("ENABLE_BACKGROUND_MODE_ERROR", "Failed to start the foreground service", null)
+                    }
+                } else {
+                    locationService.disableBackgroundMode()
+                    result.success(0)
+                }
+            } else {
+                if (enable) {
+                    locationService.result = result
+                    locationService.requestBackgroundPermissions()
+                } else {
+                    locationService.disableBackgroundMode()
+                    result.success(0)
+                }
+            }
+        } else {
+            result.success(0)
+        }
+    }
+
+    private fun onChangeNotificationOptions(
+        call: MethodCall,
+        result: Result,
+    ) {
+        try {
+            val channelName = call.argument<String>("channelName") ?: DEFAULT_CHANNEL_NAME
+            val title = call.argument<String>("title") ?: DEFAULT_NOTIFICATION_TITLE
+            val iconName = call.argument<String>("iconName") ?: DEFAULT_NOTIFICATION_ICON_NAME
+            val imageName = call.argument<String>("imageName")
+            val iconBytes = call.argument<ByteArray>("iconBytes")
+            val imageBytes = call.argument<ByteArray>("imageBytes")
+            val subtitle = call.argument<String>("subtitle")
+            val description = call.argument<String>("description")
+            val onTapBringToFront = call.argument<Boolean>("onTapBringToFront") ?: false
+
+            val hexColor = call.argument<String>("color")
+            val color = hexColor?.let { Color.parseColor(it) }
+
+            val options =
+                NotificationOptions(
+                    channelName,
+                    title,
+                    iconName,
+                    imageName,
+                    iconBytes,
+                    imageBytes,
+                    subtitle,
+                    description,
+                    color,
+                    onTapBringToFront,
+                )
+            val notificationMeta = locationService?.changeNotificationOptions(options)
+            result.success(notificationMeta)
+        } catch (e: Exception) {
+            result.error(
+                "CHANGE_NOTIFICATION_OPTIONS_ERROR",
+                "An unexpected error happened during notification options change:" + e.message,
+                null,
+            )
+        }
+    }
+
+    companion object {
+        private const val TAG = "MethodCallHandlerImpl"
+    }
+}

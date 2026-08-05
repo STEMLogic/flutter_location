@@ -1,3 +1,298 @@
+## 10.0.2
+
+### 🐛 Bug fixes
+
+- **Android:** Respect the `android.builtInKotlin` Gradle property when deciding
+  whether to apply the standalone Kotlin Gradle plugin. Previously the decision
+  was based solely on the AGP major version, assuming AGP 9 always implies
+  Built-in Kotlin. When a consumer disables Built-in Kotlin on AGP 9
+  (`android.builtInKotlin=false`), neither KGP nor Built-in Kotlin was applied
+  and the top-level `kotlin { }` block failed with no backing extension. The
+  standalone plugin is now applied whenever Built-in Kotlin is not actually
+  active (#1099).
+
+## 10.0.1
+
+### 🐛 Bug fixes
+
+- **Android:** Completed the migration to Flutter's Built-in Kotlin. The plugin
+  now configures the Kotlin compiler through the top-level `kotlin { compilerOptions {} }`
+  DSL instead of `android.kotlinOptions {}`, which is no longer available under
+  AGP 9's Built-in Kotlin. Combined with the existing conditional
+  `kotlin-android` apply, the plugin builds correctly on both AGP 8 (KGP) and
+  AGP 9 (Built-in Kotlin) (#1095).
+
+## 10.0.0
+
+A major release with one breaking change (see below) plus a large batch of
+bug fixes and small features across every supported platform — Android, iOS,
+macOS, web, Windows and Linux — accumulated since 9.0.0. Thanks to everyone
+who reported issues and opened pull requests.
+
+### 💥 Breaking changes
+
+- `LocationData.latitude` and `LocationData.longitude` are now non-nullable
+  (`double` instead of `double?`). Every platform implementation always sets
+  both, so the nullability was never load-bearing; `fromMap`/`fromJson` now
+  throw instead of silently producing a `LocationData` with null coordinates
+  if a caller (e.g. a hand-built test double) omits them (#675). **This
+  package's next release should be a major version bump.**
+
+### 🎯 Dart API
+
+- Added `LocationData.toJson()`, `LocationData.fromJson()` and
+  `LocationData.copyWith()`, so `LocationData` can be serialized, deserialized
+  and copied without manual field wiring. `fromJson` round-trips with `toJson`
+  across every field (#760).
+- Added `Location.isBackgroundPermissionGranted()`, which reports whether the
+  app has been granted background ("Allow all the time" / Always) location
+  access. Call it before `enableBackgroundMode` to show an in-app rationale
+  before sending the user to the system settings. On iOS/macOS it is `true`
+  only for the "Always" authorization; on Android it reflects the
+  `ACCESS_BACKGROUND_LOCATION` permission on API 29+ and mirrors
+  `hasPermission()` on older versions; on web it is always `false` (#538).
+- Added `getLastKnownLocation()`, which returns the most recently cached
+  `LocationData` immediately (or `null` when none is available) without waiting
+  for a fresh fix. Useful for showing an approximate position while a precise
+  location is still being acquired (#733). Implemented on Android
+  (`FusedLocationProviderClient.getLastLocation`) and iOS/macOS
+  (`CLLocationManager.location`); web has no cached-location concept and returns
+  `null`.
+- Added an optional `backgroundInterval` (milliseconds) parameter to
+  `changeSettings`. When set, the location update interval automatically switches
+  to this value while background mode is enabled and back to `interval` when it
+  is disabled. It is Android-only (Core Location exposes no equivalent on Apple
+  platforms) and defaults to `null`, preserving the current behaviour (#1011).
+- Fixed calling `getLocation()` more than once concurrently (e.g. from two
+  `FutureBuilder`s in the same build) resolving only the most recent call, on
+  both Android and iOS/macOS; earlier ones hung forever. All pending
+  `getLocation()` calls are now queued and resolved together with the same fix
+  or error (#977).
+
+### 🤖 Android
+
+- Added an optional `imageName` parameter to `changeNotificationOptions`, which
+  resolves a drawable resource (like `iconName`) and displays it as the
+  background notification's large icon. Defaults to no image, preserving the
+  previous behavior (#856).
+- Added an optional `requireBackgroundPermission` parameter to
+  `enableBackgroundMode`, defaulting to `true` (preserving current behavior).
+  Setting it to `false` skips the `ACCESS_BACKGROUND_LOCATION` ("Allow all the
+  time") prompt and starts the foreground service directly on just the regular
+  location permission — a foreground service with the location type already
+  retains location access while backgrounded without that stricter permission
+  at all (#600).
+- Added optional `iconBytes`/`imageBytes` parameters to
+  `changeNotificationOptions`, an alternative to `iconName`/`imageName` for
+  apps that don't want to add a drawable resource to their Android project —
+  e.g. to render a Flutter icon to PNG bytes at runtime instead. Bytes take
+  precedence over the resource name when both are provided (#1017).
+- Report `PermissionStatus.grantedLimited` when the user grants only approximate
+  (coarse) location without precise (fine) location on Android 12+ (API 31+),
+  mirroring iOS reduced accuracy. Previously this coarse-only case was reported as
+  `granted` (#736).
+- Fall back to the framework `LocationManager` on devices without Google Play
+  services (Huawei and other non-GMS devices), where the fused provider throws
+  `SERVICE_INVALID` and location never worked. GMS availability is checked once;
+  when present the fused path is unchanged, and the fallback is only engaged when
+  Play services are absent or report a service-unavailable status (#772, #944,
+  #1015).
+- Fixed `requestPermission()` reporting `deniedForever` on the very first
+  permission denial, including just dismissing the system dialog. This came
+  from `shouldShowRequestPermissionRationale()` returning `false` both before a
+  permission has ever been requested and once it's permanently denied, which
+  the plugin previously treated as always meaning the latter. It now tracks
+  whether the permission has actually been requested before and only reports
+  `deniedForever` in that case (#1009).
+- Fixed `LocationData.satelliteNumber` always reporting `0`. It was read from
+  `Location.extras`' legacy `"satellites"` key, which only the old GPS
+  `LocationProvider` API ever set — the `FusedLocationProviderClient` this
+  plugin has used since the Kotlin rewrite never populates it. Now parsed from
+  the `$GPGGA` NMEA sentence's "Satellites Used" field instead, the same way
+  MSL altitude already is (#808).
+- Fixed `onLocationChanged` giving no signal when location services were
+  disabled while a stream was active — it just silently stopped emitting.
+  Both the fused provider's availability callback and the framework
+  `LocationManager` fallback's provider-disabled callback now error the
+  stream, but only once the system location toggle is confirmed off, so
+  ordinary transient signal loss (tunnels, indoors) doesn't misfire (#535).
+- Fixed `getLocation()` hanging forever if the user cancelled the "enable
+  location settings" resolution dialog it triggers. The cancellation handler
+  checked the wrong pending-result field (one populated only by
+  `requestPermission()`, not `getLocation()` or the stream), so it silently
+  did nothing instead of resolving the call with an error.
+- Fixed `enableBackgroundMode()` crashing with an unhandled
+  `ForegroundServiceStartNotAllowedException` (Android 12+, when the app has
+  no qualifying foreground-launch exemption at that moment) instead of
+  reporting a normal Dart-side error.
+- Fixed `serviceEnabled()` discarding the real exception behind a generic
+  `"Location service status couldn't be determined"` error, which made past
+  reports of this error impossible to root-cause. The actual exception
+  message and stack trace are now included (#1020).
+- Fixed the location listener (and any pending `getLocation()` call) not
+  resuming after the location service was toggled off and back on through
+  Quick Settings or the Settings app rather than the plugin's own "enable
+  location" dialog — nothing previously observed that transition on the
+  primary Google Play services code path (#926).
+- Fixed an unhandled `SecurityException` crash from the fused location
+  provider's `requestLocationUpdates()` when a permission granted only "for
+  this time" (Android 11+) is revoked by the OS between the permission check
+  and the call — now surfaced as a normal `PERMISSION_DENIED` error instead
+  (#767).
+- Guarded the unconditional `kotlin-android` plugin apply behind an AGP
+  version check, matching the pattern already used by `device_info_plus`,
+  `package_info_plus` and `share_plus`. AGP 9+ deprecated the standalone
+  Kotlin Gradle Plugin in favor of its own built-in Kotlin support, and
+  Flutter's temporary compatibility shim for that is scheduled for removal
+  (#1048).
+
+### 🍎 iOS & macOS
+
+- Populated `LocationData.isMock` on Apple platforms. On iOS 15.0+/macOS 12.0+
+  it reflects `CLLocation.sourceInformation.isSimulatedBySoftware`; on older
+  systems it stays `false`, as Core Location exposes no equivalent flag (#796).
+- Moved `CLLocationManager.locationServicesEnabled()` off the main thread. Apple
+  warns that this call can block the caller while location services start up;
+  invoking it on the main thread triggered the "UI unresponsiveness" runtime
+  warning and could hang the app (#782, #789, #909, #1004, #1027). It now runs on
+  a background queue with the result delivered back on the main thread, so
+  `getLocation`, `serviceEnabled`, `requestService` and `changeSettings` no
+  longer stall the UI.
+- Added an Apple **privacy manifest** (`PrivacyInfo.xcprivacy`) for iOS and macOS,
+  declaring no tracking, no collected data and no required-reason API use, as
+  required for App Store submission (#947).
+- Fixed `getLocation()` hanging forever when Core Location delivered fewer than
+  three updates — e.g. a static iOS-simulator "Custom Location" or a sparse first
+  fix. The stale-location guard swallowed the first two updates by count; it now
+  skips fixes by age instead, so the first fresh update always resolves the call
+  (#798, #955, #1005, #660, #824, #657, #1013).
+- Exposed `LocationData.isProducedByAccessory`, populated from
+  `CLLocation.sourceInformation?.isProducedByAccessory` on iOS 15+/macOS 12+. It
+  reports whether a fix came from a connected accessory such as an external GPS
+  receiver, and defaults to `false` on older Apple systems and on Android/web
+  (#914).
+- Fixed `getLocation()` never resolving (no value, no exception) when
+  authorization was `.notDetermined` and the user denied the resulting
+  just-in-time permission prompt. It now rejects with a `PERMISSION_DENIED`
+  error in that case, matching the behavior when authorization is already
+  `.denied` before the call starts (#979).
+- Fixed `LocationData.speed`/`speedAccuracy` reporting a literal `-1` instead
+  of `null` for an indoor/stationary fix. Core Location uses a negative value
+  as its own documented sentinel for "invalid/not available"; it's now mapped
+  to `null` instead of being passed through as if it were a real measurement
+  (#741).
+- Recognized the modern `NSLocationAlwaysAndWhenInUseUsageDescription`
+  `Info.plist` key when deciding whether "Always" authorization can be
+  requested. Only the pre-iOS 11 `NSLocationAlwaysUsageDescription` key was
+  checked before, so an app declaring solely the current, README-recommended
+  key was treated as having no always-usage description at all (#962).
+- Fixed `changeSettings(interval: ...)` having no effect at all; the stream
+  fired as fast as Core Location delivered fixes. `interval` was never read on
+  iOS/macOS — Core Location has no native time-based interval concept (only
+  `distanceFilter`, a minimum distance) — so it's now applied by throttling
+  stream delivery client-side instead (#960).
+- Fixed `hasPermission()` reporting plain `denied` for an authorization status
+  that `requestPermission()` already correctly reports as `deniedForever`
+  (iOS has no "denied, can ask again" state — once authorization is
+  `.denied`, the system won't show the prompt again). The two methods now
+  agree on the same state (#738).
+- Fixed `getLocation()` hanging forever when denied in the same authorization
+  change as a concurrent `requestPermission()` call — only the
+  `requestPermission()` side was being resolved.
+- Fixed `getLocation()`/`hasPermission()` hanging or misreporting for
+  `.restricted` authorization status (parental controls/MDM), which wasn't
+  handled the same way as `.denied`.
+
+### 🌐 Web
+
+- Fixed `hasPermission()` throwing on web (`Failed to read the 'name' property
+  from 'PermissionDescriptor'` / a `TypeError`). The Permissions API was handed
+  an opaque boxed Dart object instead of a real JS descriptor; it now receives a
+  proper `{ name: 'geolocation' }` object literal (#978, #987).
+- Fixed `getLocation()`/`onLocationChanged` errors not being catchable as
+  `PlatformException` on web like they are on Android/iOS; browser Geolocation
+  errors are now mapped to a `PlatformException` with a
+  `PERMISSION_DENIED`/`POSITION_UNAVAILABLE`/`TIMEOUT` code (#967).
+- Fixed `requestPermission()` reporting `deniedForever` for a location-fetch
+  failure unrelated to permission (e.g. a GPS timeout after the user already
+  allowed access) (#891).
+- Fixed `hasPermission()` crashing in browsers/webviews that support Geolocation
+  but not the Permissions API (`navigator.permissions` undefined); it now
+  reports "not yet determined" instead (#959).
+
+### 📝 Docs
+
+- Clarified that `enableBackgroundMode(enable: true)` is a standalone call that
+  can be made before listening to `onLocationChanged`, and that on Android it
+  requests the `ACCESS_BACKGROUND_LOCATION` permission when needed — so
+  background permission can be requested independently (#756).
+- Documented that background mode does not survive the app being killed or
+  terminated by the user or OS — neither the Android foreground service nor
+  the iOS background execution exemption can run once the process itself no
+  longer exists — and pointed to `flutter_background_geolocation` for that use
+  case (#707, #724, #773, #774, #888, #994, #1021, #1024, #1025).
+- Clarified that `pausesLocationUpdatesAutomatically` (default `true` on
+  iOS/macOS) can cause continuous background tracking to stop unpredictably,
+  and that setting it to `false` via `changeSettings` avoids that for apps
+  that need truly continuous updates.
+- Documented that `changeNotificationOptions`' `iconName`/`imageName` resolve
+  drawables by name at runtime, which Android's release-build resource
+  shrinker can strip since it can't see dynamic lookups — and how to keep
+  them via a `res/raw/keep.xml` `tools:keep` entry (#839).
+- Documented posting fully custom notification content (e.g. via
+  `flutter_local_notifications`) by reusing the `channelId`/`notificationId`
+  `changeNotificationOptions` already returns, since Android identifies the
+  foreground service's notification purely by that ID (#753, #928).
+
+## 9.0.0
+
+A major maintenance release that modernises every platform and adds desktop
+support. Thanks to everyone who reported issues and opened pull requests.
+
+### ✨ New platforms
+
+- **Windows** support, backed by the `Windows.Devices.Geolocation` (WinRT) APIs.
+- **Linux** support, backed by GeoClue2 over D-Bus.
+
+### 🤖 Android
+
+- Rewrote the plugin from Java to **Kotlin**.
+- Moved off the deprecated `FusedLocationProvider` API to `LocationRequest.Builder`
+  and `Priority`, removing the build-time deprecation warnings (#1019, #1023, #1035).
+- Declare `FOREGROUND_SERVICE_TYPE_LOCATION` so background location keeps working
+  on Android 14+ (#970).
+- Approximate ("coarse") location grants are now honoured instead of being
+  reported as denied (#990, #991).
+- Fixed a crash on dispose when the engine had already detached (#1041).
+- More reliable mock-location detection on Android 12+ (#1016).
+- Toolchain bumps: Android Gradle Plugin 8.11, Kotlin 2.2, Gradle 8.14,
+  `compileSdk`/`targetSdk` 36.
+
+### 🍎 iOS & macOS
+
+- Rewrote the plugin from Objective-C to **Swift**, sharing a single source
+  across iOS and macOS.
+- Added **Swift Package Manager** support (#1044, #1047).
+- Adopted the modern authorization APIs and removed the deprecated `UIAlertView`.
+- No longer crashes at launch when the Info.plist usage description is missing
+  (#1040, #1042).
+- `getLocation` now resolves when precise location is turned off (#984).
+
+### 🧹 Housekeeping
+
+- Bumped dev dependencies (`leancode_lint`, `build_runner`, `mockito`).
+- Fixed the example app build and migrated it to current Flutter templates.
+- Documented the newly supported platforms.
+
+### ⚠️ Breaking changes
+
+- No Dart API changes — existing code continues to work.
+- Native deployment floors were raised: iOS 12, macOS 10.15, and the newer
+  Android toolchain above.
+- Android now requests both `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION`;
+  apps that use background location should also declare
+  `FOREGROUND_SERVICE_LOCATION`.
+
 ## 8.0.1
 
 - Bump dependency on `location_platform_interface` to `^6.0.1` (#933)

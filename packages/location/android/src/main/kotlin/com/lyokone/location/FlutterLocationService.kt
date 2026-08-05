@@ -1,0 +1,465 @@
+package com.lyokone.location
+
+import android.Manifest
+import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.graphics.BitmapFactory
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.graphics.drawable.IconCompat
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.PluginRegistry
+
+const val DEFAULT_CHANNEL_NAME: String = "Location background service"
+const val DEFAULT_NOTIFICATION_TITLE: String = "Location background service running"
+const val DEFAULT_NOTIFICATION_ICON_NAME: String = "navigation_empty_icon"
+
+data class NotificationOptions(
+    val channelName: String = DEFAULT_CHANNEL_NAME,
+    val title: String = DEFAULT_NOTIFICATION_TITLE,
+    val iconName: String = DEFAULT_NOTIFICATION_ICON_NAME,
+    val imageName: String? = null,
+    val iconBytes: ByteArray? = null,
+    val imageBytes: ByteArray? = null,
+    val subtitle: String? = null,
+    val description: String? = null,
+    val color: Int? = null,
+    val onTapBringToFront: Boolean = false,
+)
+
+class BackgroundNotification(
+    private val context: Context,
+    private val channelId: String,
+    private val notificationId: Int,
+) {
+    private var options: NotificationOptions = NotificationOptions()
+    private var builder: NotificationCompat.Builder =
+        NotificationCompat.Builder(context, channelId)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+
+    init {
+        updateNotification(options, false)
+    }
+
+    private fun getDrawableId(iconName: String): Int {
+        return context.resources.getIdentifier(iconName, "drawable", context.packageName)
+    }
+
+    private fun buildBringToFrontIntent(): PendingIntent? {
+        val intent: Intent? =
+            context.packageManager
+                .getLaunchIntentForPackage(context.packageName)
+                ?.setPackage(null)
+                ?.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+
+        return if (intent != null) {
+            PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        } else {
+            null
+        }
+    }
+
+    private fun updateChannel(channelName: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val notificationManager = NotificationManagerCompat.from(context)
+            val channel =
+                NotificationChannel(
+                    channelId,
+                    channelName,
+                    NotificationManager.IMPORTANCE_NONE,
+                ).apply {
+                    lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+                }
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun updateNotification(
+        options: NotificationOptions,
+        notify: Boolean,
+    ) {
+        // iconBytes/imageBytes let a caller supply a pre-rendered icon (e.g. a
+        // Flutter IconData rasterized to PNG bytes) instead of adding a drawable
+        // resource to their Android project by name (#1017). Bytes take
+        // precedence over the by-name lookup when both are provided.
+        val largeIcon =
+            options.imageBytes?.let { bytes -> BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                ?: options.imageName?.let { imageName ->
+                    getDrawableId(imageName).let { imageId ->
+                        if (imageId != 0) {
+                            BitmapFactory.decodeResource(context.resources, imageId)
+                        } else {
+                            null
+                        }
+                    }
+                }
+        builder =
+            if (options.iconBytes != null) {
+                val bitmap = BitmapFactory.decodeByteArray(options.iconBytes, 0, options.iconBytes.size)
+                builder.setSmallIcon(IconCompat.createWithBitmap(bitmap))
+            } else {
+                val iconId =
+                    getDrawableId(options.iconName).let {
+                        if (it != 0) it else getDrawableId(DEFAULT_NOTIFICATION_ICON_NAME)
+                    }
+                builder.setSmallIcon(iconId)
+            }
+        builder =
+            builder
+                .setContentTitle(options.title)
+                .setLargeIcon(largeIcon)
+                .setContentText(options.subtitle)
+                .setSubText(options.description)
+
+        builder =
+            if (options.color != null) {
+                builder.setColor(options.color).setColorized(true)
+            } else {
+                builder.setColor(0).setColorized(false)
+            }
+
+        builder =
+            if (options.onTapBringToFront) {
+                builder.setContentIntent(buildBringToFrontIntent())
+            } else {
+                builder.setContentIntent(null)
+            }
+
+        if (notify) {
+            val notificationManager = NotificationManagerCompat.from(context)
+            notificationManager.notify(notificationId, builder.build())
+        }
+    }
+
+    fun updateOptions(
+        options: NotificationOptions,
+        isVisible: Boolean,
+    ) {
+        if (options.channelName != this.options.channelName) {
+            updateChannel(options.channelName)
+        }
+
+        updateNotification(options, isVisible)
+
+        this.options = options
+    }
+
+    fun build(): Notification {
+        updateChannel(options.channelName)
+        return builder.build()
+    }
+}
+
+class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResultListener {
+    companion object {
+        private const val TAG = "FlutterLocationService"
+
+        private const val REQUEST_PERMISSIONS_REQUEST_CODE: Int = 641
+
+        private const val ONGOING_NOTIFICATION_ID = 75418
+        private const val CHANNEL_ID = "flutter_location_channel_01"
+    }
+
+    // Binder given to clients
+    private val binder = LocalBinder()
+
+    // Service is foreground
+    private var isForeground = false
+
+    private var activity: Activity? = null
+
+    private var backgroundNotification: BackgroundNotification? = null
+
+    var location: FlutterLocation? = null
+        private set
+
+    // Store result until a permission check is resolved
+    var result: MethodChannel.Result? = null
+
+    val locationActivityResultListener: PluginRegistry.ActivityResultListener?
+        get() = location
+
+    val locationRequestPermissionsResultListener: PluginRegistry.RequestPermissionsResultListener?
+        get() = location
+
+    val serviceRequestPermissionsResultListener: PluginRegistry.RequestPermissionsResultListener
+        get() = this
+
+    inner class LocalBinder : Binder() {
+        fun getService(): FlutterLocationService = this@FlutterLocationService
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "Creating service.")
+
+        location = FlutterLocation(applicationContext, null)
+        backgroundNotification =
+            BackgroundNotification(
+                applicationContext,
+                CHANNEL_ID,
+                ONGOING_NOTIFICATION_ID,
+            )
+    }
+
+    override fun onBind(intent: Intent?): IBinder {
+        Log.d(TAG, "Binding to location service.")
+        return binder
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        Log.d(TAG, "Unbinding from location service.")
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        Log.d(TAG, "Destroying service.")
+
+        location = null
+        backgroundNotification = null
+
+        super.onDestroy()
+    }
+
+    fun checkBackgroundPermissions(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ActivityCompat.checkSelfPermission(
+                applicationContext,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            location?.checkPermissions() ?: false
+        }
+    }
+
+    fun requestBackgroundPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val activity =
+                activity ?: run {
+                    // Without an Activity we can't show the system permission dialog.
+                    // Surface the current grant state instead of crashing.
+                    if (checkBackgroundPermissions()) {
+                        if (enableBackgroundMode()) {
+                            result?.success(1)
+                        } else {
+                            result?.error(
+                                "ENABLE_BACKGROUND_MODE_ERROR",
+                                "Failed to start the foreground service",
+                                null,
+                            )
+                        }
+                    } else {
+                        result?.error(
+                            "PERMISSION_DENIED",
+                            "Background location permission not granted",
+                            null,
+                        )
+                    }
+                    result = null
+                    return
+                }
+
+            val location = this.location
+            // Android 11+: background must be requested alone, after foreground.
+            if (location != null && !location.checkPermissions()) {
+                val enableResult = result
+                location.result =
+                    object : MethodChannel.Result {
+                        override fun success(res: Any?) {
+                            if (location.checkPermissions()) {
+                                requestBackgroundPermissions()
+                            } else {
+                                enableResult?.error(
+                                    "PERMISSION_DENIED",
+                                    "Location permission denied",
+                                    null,
+                                )
+                                result = null
+                            }
+                        }
+
+                        override fun error(
+                            errorCode: String,
+                            errorMessage: String?,
+                            errorDetails: Any?,
+                        ) {
+                            enableResult?.error(errorCode, errorMessage, errorDetails)
+                            result = null
+                        }
+
+                        override fun notImplemented() {
+                            enableResult?.notImplemented()
+                            result = null
+                        }
+                    }
+                location.requestPermissions()
+                return
+            }
+
+            ActivityCompat.requestPermissions(
+                activity,
+                arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+                REQUEST_PERMISSIONS_REQUEST_CODE,
+            )
+        } else {
+            location?.result = this.result
+            location?.requestPermissions()
+            // result passed to Location reference here won't be needed
+            this.result = null
+        }
+    }
+
+    fun isInForegroundMode(): Boolean = isForeground
+
+    /**
+     * Starts the service in foreground mode. Returns whether it succeeded:
+     * on Android 12+ the system can refuse a foreground service start (e.g.
+     * `ForegroundServiceStartNotAllowedException` when the app has no
+     * qualifying foreground-launch exemption at the time of the call), which
+     * previously crashed with an unhandled exception instead of surfacing a
+     * normal Dart-side error (#945).
+     */
+    fun enableBackgroundMode(): Boolean {
+        if (isForeground) {
+            Log.d(TAG, "Service already in foreground mode.")
+            return true
+        }
+        Log.d(TAG, "Start service in foreground mode.")
+
+        val notification = backgroundNotification!!.build()
+        val foregroundServiceType =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            } else {
+                0
+            }
+        try {
+            ServiceCompat.startForeground(this, ONGOING_NOTIFICATION_ID, notification, foregroundServiceType)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start service in foreground mode.", e)
+            return false
+        }
+
+        isForeground = true
+
+        // Switch to the background update interval, if one was configured.
+        location?.setBackgroundMode(true)
+        return true
+    }
+
+    fun disableBackgroundMode() {
+        Log.d(TAG, "Stop service in foreground.")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+
+        isForeground = false
+
+        // Restore the foreground update interval.
+        location?.setBackgroundMode(false)
+    }
+
+    fun changeNotificationOptions(options: NotificationOptions): Map<String, Any>? {
+        backgroundNotification?.updateOptions(options, isForeground)
+
+        return if (isForeground) {
+            mapOf("channelId" to CHANNEL_ID, "notificationId" to ONGOING_NOTIFICATION_ID)
+        } else {
+            null
+        }
+    }
+
+    fun setActivity(activity: Activity?) {
+        this.activity = activity
+        location?.activity = activity
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            requestCode != REQUEST_PERMISSIONS_REQUEST_CODE
+        ) {
+            return false
+        }
+
+        // Android 11+: background is requested alone (after foreground).
+        val backgroundOnly =
+            permissions.size == 1 &&
+                permissions[0] == Manifest.permission.ACCESS_BACKGROUND_LOCATION
+        // Legacy combined request (pre-fix / older clients).
+        val combined =
+            permissions.size == 2 &&
+                permissions[0] == Manifest.permission.ACCESS_FINE_LOCATION &&
+                permissions[1] == Manifest.permission.ACCESS_BACKGROUND_LOCATION
+
+        if (!backgroundOnly && !combined) {
+            return false
+        }
+
+        val backgroundGranted =
+            if (backgroundOnly) {
+                grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            } else {
+                grantResults.size >= 2 &&
+                    grantResults[0] == PackageManager.PERMISSION_GRANTED &&
+                    grantResults[1] == PackageManager.PERMISSION_GRANTED
+            }
+
+        if (backgroundGranted) {
+            if (enableBackgroundMode()) {
+                result?.success(1)
+            } else {
+                result?.error(
+                    "ENABLE_BACKGROUND_MODE_ERROR",
+                    "Failed to start the foreground service",
+                    null,
+                )
+            }
+            result = null
+        } else {
+            if (!shouldShowRequestBackgroundPermissionRationale()) {
+                result?.error(
+                    "PERMISSION_DENIED_NEVER_ASK",
+                    "Background location permission denied forever - please open app settings",
+                    null,
+                )
+            } else {
+                result?.error("PERMISSION_DENIED", "Background location permission denied", null)
+            }
+            result = null
+        }
+        return true
+    }
+
+    private fun shouldShowRequestBackgroundPermissionRationale(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            activity?.let {
+                ActivityCompat.shouldShowRequestPermissionRationale(
+                    it,
+                    Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+                )
+            } ?: !checkBackgroundPermissions()
+        } else {
+            false
+        }
+}
